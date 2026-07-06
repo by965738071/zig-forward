@@ -18,7 +18,7 @@ pub const HardwareClosedResponse = struct {
             allocator,
             &.{ "status", "clazz" },
             &.{
-                std.json.Value{ .string = "HardwareClosed" },
+                std.json.Value{ .string = "closed" },
                 std.json.Value{ .string = "HardwareClosed" },
             },
         );

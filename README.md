@@ -1,6 +1,10 @@
 # Zig Forward
 
-一个基于Zig重写实现的高性能 TCP 转发/代理服务，提取自火箭测试平台硬件通信中间件。
+![Zig](https://img.shields.io/badge/Zig-0.17.0--dev-F7A41D?logo=zig&labelColor=000)
+![License](https://img.shields.io/badge/license-MIT-green)
+![TCP](https://img.shields.io/badge/protocol-TCP-blue)
+
+一个基于 Zig 实现的高性能 TCP 转发/代理服务，提取自火箭测试平台硬件通信中间件。
 
 ## 背景
 

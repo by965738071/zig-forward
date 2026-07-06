@@ -30,10 +30,11 @@ pub const GenericResponse = struct {
     board_id: u8,
     hex: []const u8,
     raw_bytes: []const u8,
+    allocator: std.mem.Allocator,
 
-    pub fn deinit(self: *GenericResponse, allocator: std.mem.Allocator) void {
-        allocator.free(self.hex);
-        allocator.free(self.raw_bytes);
+    pub fn deinit(self: *GenericResponse) void {
+        self.allocator.free(self.hex);
+        self.allocator.free(self.raw_bytes);
     }
 };
 
@@ -57,6 +58,7 @@ pub fn parseResponse(packet: []const u8, allocator: std.mem.Allocator) !DynRespo
             const raw = try allocator.dupe(u8, packet);
             return DynResponse{
                 .generic = .{
+                    .allocator = allocator,
                     .packet_type = packet_type,
                     .board_id = board_id,
                     .hex = hex,
