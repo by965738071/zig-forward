@@ -60,6 +60,8 @@ test {
     _ = config.util;
     _ = config.custom_codec;
     _ = config.state;
+    _ = config.handler_registry;
+    _ = config.frame_decoder;
     _ = model.pc.common_request;
     _ = model.pc.pc_server;
     _ = model.hardware.hardware_server;

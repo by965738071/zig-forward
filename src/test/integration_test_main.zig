@@ -32,12 +32,14 @@ pub fn main() !void {
     // ── Connect 2 hardware devices ──
     var hw1 = try TcpClient.connect("127.0.0.1", hw_port, io);
     errdefer hw1.close(io);
-    const hw1_addr = try std.fmt.allocPrint(alloc, "{}", .{hw1.stream.socket.address});
+    const ip1 = hw1.stream.socket.address.ip4;
+    const hw1_addr = try std.fmt.allocPrint(alloc, "{d}.{d}.{d}.{d}:{d}", .{ ip1.bytes[0], ip1.bytes[1], ip1.bytes[2], ip1.bytes[3], ip1.port });
     std.debug.print("  ✓ HW1 connected: {s}\n", .{hw1_addr});
 
     var hw2 = try TcpClient.connect("127.0.0.1", hw_port, io);
     errdefer hw2.close(io);
-    const hw2_addr = try std.fmt.allocPrint(alloc, "{}", .{hw2.stream.socket.address});
+    const ip2 = hw2.stream.socket.address.ip4;
+    const hw2_addr = try std.fmt.allocPrint(alloc, "{d}.{d}.{d}.{d}:{d}", .{ ip2.bytes[0], ip2.bytes[1], ip2.bytes[2], ip2.bytes[3], ip2.port });
     std.debug.print("  ✓ HW2 connected: {s}\n", .{hw2_addr});
 
     Io.sleep(io, .{ .nanoseconds = 200_000_000 }, .real) catch {};

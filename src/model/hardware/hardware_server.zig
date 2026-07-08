@@ -5,9 +5,18 @@ const net = Io.net;
 const GlobalState = @import("../../config/state.zig").GlobalState;
 const PcClientState = @import("../../config/state.zig").PcClientState;
 const custom_codec = @import("../../config/custom_codec.zig");
-const common_response = @import("common_response.zig");
 const currentTimestamp = @import("../../config/util.zig").currentTimestamp;
 const hexEncode = @import("../../config/util.zig").hexEncode;
+const FrameDecoder = @import("../../config/frame_decoder.zig").FrameDecoder;
+const DecoderFactory = @import("../../config/frame_decoder.zig").DecoderFactory;
+const HandlerRegistry = @import("../../config/handler_registry.zig").HandlerRegistry;
+
+/// Context passed to hardware packet handlers.
+pub const HwPacketContext = struct {
+    io: Io,
+};
+
+pub const PacketRegistry = HandlerRegistry(u8, HwPacketContext);
 
 /// 硬件设备 TCP 服务。
 ///
@@ -19,17 +28,34 @@ state: *GlobalState,
 io: Io,
 host: []const u8,
 port: u16,
+packet_registry: PacketRegistry,
+
+/// 帧解码器工厂（默认为 EB90，可通过 `setDecoderFactory` 替换）
+decoder_factory: DecoderFactory,
 
 pub const HardwareServer = @This();
 
 pub fn init(allocator: std.mem.Allocator, state: *GlobalState, io: Io, host: []const u8, port: u16) HardwareServer {
-    return .{
+    var self: HardwareServer = .{
         .allocator = allocator,
         .state = state,
         .io = io,
         .host = host,
         .port = port,
+        .packet_registry = PacketRegistry.init(allocator),
+        .decoder_factory = custom_codec.decoder_factory,
     };
+
+    // ── 注册内置默认 handler（hex fallback）──
+    self.packet_registry.setDefault(defaultPacketHandler);
+
+    return self;
+}
+
+/// 替换帧解码器工厂。
+/// 默认使用 `custom_codec.decoder_factory`（EB90 二进制协议）。
+pub fn setDecoderFactory(self: *HardwareServer, factory: DecoderFactory) void {
+    self.decoder_factory = factory;
 }
 
 pub fn start(self: *HardwareServer) !void {
@@ -41,7 +67,10 @@ pub fn start(self: *HardwareServer) !void {
 
     while (true) {
         const stream = try server.accept(self.io);
-        const hw_id = try std.fmt.allocPrint(self.allocator, "{}", .{stream.socket.address});
+        const ip = stream.socket.address.ip4;
+        const hw_id = try std.fmt.allocPrint(self.allocator, "{d}.{d}.{d}.{d}:{d}", .{
+            ip.bytes[0], ip.bytes[1], ip.bytes[2], ip.bytes[3], ip.port,
+        });
         std.log.info("Hardware device {s} connected", .{hw_id});
 
         _ = Io.concurrent(self.io, handleHardware, .{ self, stream, hw_id }) catch |err| {
@@ -57,7 +86,7 @@ fn handleHardware(hw_server: *HardwareServer, stream: net.Stream, hw_id: []const
     defer hw_server.allocator.free(hw_id);
 
     handleHardwareInner(hw_server, stream, hw_id) catch |err| {
-        std.log.info("Hardware {s} disconnected ({s})", .{ hw_id, @errorName(err) });
+        std.log.err("Hardware {s} disconnected ({})", .{ hw_id, err });
     };
 }
 
@@ -94,14 +123,16 @@ fn handleHardwareInner(hw_server: *HardwareServer, stream: net.Stream, hw_id: []
         allocator.destroy(hw_state);
     }
 
-    // ── 3. 读取循环 ──
+    // ── 3. 创建帧解码器（通过工厂，默认为 EB90）──
+    var decoder = try hw_server.decoder_factory.create(allocator);
+    defer decoder.deinit(allocator);
+
+    // ── 4. 读取循环 ──
     // reader 内部缓冲区与 readVec 目标缓冲区必须分离，避免 @memcpy 重叠
     var reader_buf: [4096]u8 = undefined;
     var read_buf: [4096]u8 = undefined;
     var reader_io = stream.reader(io, &reader_buf);
     const reader = &reader_io.interface;
-    var decoder = custom_codec.Decoder.init(allocator);
-    defer decoder.deinit();
 
     outer: while (true) {
         var read_iov: [1][]u8 = .{read_buf[0..]};
@@ -117,20 +148,23 @@ fn handleHardwareInner(hw_server: *HardwareServer, stream: net.Stream, hw_id: []
             const packet = try decoder.decode() orelse break;
             defer allocator.free(packet);
 
+            const packet_type = if (packet.len > 2) packet[2] else 0;
             std.log.info("Hardware {s} packet: type=0x{X:0>2} len={d}", .{
                 hw_id,
-                if (packet.len > 2) packet[2] else 0,
+                packet_type,
                 packet.len,
             });
 
-            // 尝试结构化解析，失败则回退到 hex JSON
-            // 两个路径都失败时跳到外层循环重新读取（避免执行下方 defer）
-            const json = parseResponseJson(allocator, io, packet) catch blk: {
-                const fallback = buildFallbackJson(allocator, io, packet) catch {
-                    std.log.warn("failed to build any JSON for hardware packet, dropping", .{});
-                    continue :outer;
-                };
-                break :blk fallback;
+            // 通过 HandlerRegistry 分发：按 packet_type 匹配 handler
+            var hw_ctx = HwPacketContext{ .io = io };
+            const json = try hw_server.packet_registry.dispatch(
+                &hw_ctx,
+                packet_type,
+                packet,
+                allocator,
+            ) orelse {
+                std.log.warn("no handler for hardware packet type 0x{X:0>2}, dropping", .{packet_type});
+                continue :outer;
             };
             defer allocator.free(json);
 
@@ -139,41 +173,18 @@ fn handleHardwareInner(hw_server: *HardwareServer, stream: net.Stream, hw_id: []
     }
 }
 
-// ── JSON 构建辅助 ──
+// ── Registry Handler ──
 
-/// 将二进制包解析为结构化响应并包装为 JSON。
-fn parseResponseJson(allocator: std.mem.Allocator, io: Io, packet: []const u8) ![]u8 {
-    var dyn_resp = try common_response.parseResponse(packet, allocator);
-    defer dyn_resp.deinit(allocator);
-
-    const ts = currentTimestamp(io);
-
-    switch (dyn_resp) {
-        .closed => {
-            return std.fmt.allocPrint(
-                allocator,
-                "{{\"code\":0,\"msg\":\"ok\",\"body\":{{\"clazz\":\"HardwareClosed\"}},\"timestamp\":{d}}}\n",
-                .{ts},
-            );
-        },
-        .generic => |*g| {
-            return std.fmt.allocPrint(
-                allocator,
-                "{{\"code\":0,\"msg\":\"ok\",\"body\":{{\"clazz\":\"HardwareResponse\",\"type\":{d},\"board\":{d},\"hex\":\"{s}\",\"length\":{d}}},\"timestamp\":{d}}}\n",
-                .{ g.packet_type, g.board_id, g.hex, g.raw_bytes.len, ts },
-            );
-        },
-    }
-}
-
-/// 回退方案：hex 编码 JSON（当 parseResponse 失败时使用）。
-fn buildFallbackJson(allocator: std.mem.Allocator, io: Io, packet: []const u8) ![]u8 {
+/// Default handler: hex-encode the entire packet as a fallback.
+/// Registered as the default for all unmatched packet types.
+fn defaultPacketHandler(ctx: *HwPacketContext, _: u8, packet: []const u8, allocator: std.mem.Allocator) anyerror!?[]u8 {
     const hex = try hexEncode(allocator, packet);
     defer allocator.free(hex);
-    const ts = currentTimestamp(io);
-    return std.fmt.allocPrint(
+    const ts = currentTimestamp(ctx.io);
+    const json = try std.fmt.allocPrint(
         allocator,
         "{{\"code\":0,\"msg\":\"ok\",\"body\":{{\"clazz\":\"HardwareResponse\",\"hex\":\"{s}\"}},\"timestamp\":{d}}}\n",
         .{ hex, ts },
     );
+    return json;
 }

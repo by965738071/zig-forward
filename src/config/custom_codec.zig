@@ -1,4 +1,6 @@
 const std = @import("std");
+const FrameDecoder = @import("frame_decoder.zig").FrameDecoder;
+const DecoderFactory = @import("frame_decoder.zig").DecoderFactory;
 
 pub const HEADER: u16 = 0xEB90;
 pub const HEADER_LEN: usize = 2;
@@ -90,6 +92,48 @@ pub fn checksum(data: []const u8) u16 {
     for (data) |b| sum +%= b;
     return sum;
 }
+
+// ── FrameDecoder adapter (heap-allocated, VTable interface) ──
+
+/// VTable implementation for wrapping `Decoder` as a `FrameDecoder`.
+const vtable_impl = struct {
+    fn feed(ctx: *anyopaque, data: []const u8) anyerror!void {
+        const dec: *Decoder = @ptrCast(@alignCast(ctx));
+        try dec.feed(data);
+    }
+
+    fn decode(ctx: *anyopaque) anyerror!?[]u8 {
+        const dec: *Decoder = @ptrCast(@alignCast(ctx));
+        const result = try dec.decode();
+        return result;
+    }
+
+    fn deinit(ctx: *anyopaque, allocator: std.mem.Allocator) void {
+        const dec: *Decoder = @ptrCast(@alignCast(ctx));
+        dec.deinit();
+        allocator.destroy(dec);
+    }
+};
+
+/// Static vtable for this codec's FrameDecoder adapter.
+const adapter_vtable = FrameDecoder.VTable{
+    .feed = vtable_impl.feed,
+    .decode = vtable_impl.decode,
+    .deinit = vtable_impl.deinit,
+};
+
+/// Factory function: allocates a `Decoder` on the heap and wraps it as a FrameDecoder.
+fn createDecoderAdapter(allocator: std.mem.Allocator) anyerror!FrameDecoder {
+    const dec = try allocator.create(Decoder);
+    dec.* = Decoder.init(allocator);
+    return .{
+        .ptr = dec,
+        .vtable = &adapter_vtable,
+    };
+}
+
+/// Default frame decoder factory, backed by this codec's `Decoder`.
+pub const decoder_factory = DecoderFactory{ .create = createDecoderAdapter };
 
 pub fn encode(allocator: std.mem.Allocator, packet_type: u8, board_id: u8, payload: []const u8) ![]u8 {
     const total = HEADER_LEN + TYPE_LEN + BOARD_ID_LEN + LENGTH_FIELD_LEN + payload.len + CHECKSUM_LEN;
