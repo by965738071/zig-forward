@@ -4,12 +4,50 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const config_mod = b.createModule(.{
+        .root_source_file = b.path("src/config/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const pc_server_mod = b.createModule(.{
+        .root_source_file = b.path("src/model/pc/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "config", .module = config_mod },
+        },
+    });
+
+    const hw_server = b.createModule(.{
+        .root_source_file = b.path("src/model/hw/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "config", .module = config_mod },
+        },
+    });
+
+    const parser_mod = b.createModule(.{
+        .root_source_file = b.path("src/parser/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "config", .module = config_mod },
+        },
+    });
+
     const exe = b.addExecutable(.{
         .name = "zig_forward",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "config", .module = config_mod },
+                .{ .name = "pc_server", .module = pc_server_mod },
+                .{ .name = "hw_server", .module = hw_server },
+                .{ .name = "parser", .module = parser_mod },
+            },
         }),
     });
 

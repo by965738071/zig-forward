@@ -1,8 +1,7 @@
 pub const state = @import("state.zig");
-
-pub const custom_codec = @import("custom_codec.zig");
-
 pub const util = @import("util.zig");
-
 pub const handler_registry = @import("handler_registry.zig");
-pub const frame_decoder = @import("frame_decoder.zig");
+
+/// 配置结构体类型（config/config.zig 定义的 struct）
+pub const ConfigType = @import("config.zig");
+pub const config = @import("config.zig");

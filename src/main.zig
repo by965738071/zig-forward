@@ -1,11 +1,14 @@
 const std = @import("std");
 const Io = std.Io;
-pub const model = @import("model/root.zig");
-pub const config = @import("config/root.zig");
 
-const GlobalState = config.state.GlobalState;
-const PcServer = model.pc.pc_server.PcServer;
-const HardwareServer = model.hardware.hardware_server.HardwareServer;
+const GlobalState = @import("config").state.GlobalState;
+const PcServer = @import("pc_server").pc_server.PcServer;
+const HardwareServer = @import("hw_server").hardware_server.HardwareServer;
+const JsonLineParser = @import("parser").json_parser.JsonLineParser;
+const ByteParser = @import("parser").byte_parser.ByteParser;
+const cfg = @import("config");
+const ConfigType = cfg.ConfigType;
+const config: ConfigType = .{};
 
 pub fn main(init: std.process.Init) !void {
     _ = init;
@@ -27,43 +30,46 @@ pub fn main(init: std.process.Init) !void {
     var backend = Io.Threaded.init(allocator, .{});
     const io = backend.io();
 
-    const pc_port: u16 = 9000;
-    const hw_port: u16 = 9001;
+    std.log.info("Zig Forward starting — PC:{d}  Hardware:{d}", .{ config.pc.port, config.hw.port });
 
-    std.log.info("Zig Forward starting — PC:{d}  Hardware:{d}", .{ pc_port, hw_port });
+    // ── PC server ──
+    var pc_server = PcServer([]const u8, JsonLineParser([]const u8))
+        .init(allocator, &state, io, config);
+    defer pc_server.deinit();
 
-    // ── PC server thread ──
-    const pc_thread = try std.Thread.spawn(.{}, struct {
-        fn run(alloc: std.mem.Allocator, st: *GlobalState, i: Io, host: []const u8, port: u16) void {
-            var server = PcServer.init(alloc, st, i, host, port);
-            server.start() catch |err| {
-                std.log.err("PC server exited: {}", .{err});
-            };
-        }
-    }.run, .{ allocator, &state, io, "0.0.0.0", pc_port });
+    for (config.commands) |cmd| {
+        pc_server.registerCommand(cmd.name, cmd.handler) catch {};
+    }
 
-    // ── Hardware server thread ──
-    const hw_thread = try std.Thread.spawn(.{}, struct {
-        fn run(alloc: std.mem.Allocator, st: *GlobalState, i: Io, host: []const u8, port: u16) void {
-            var server = HardwareServer.init(alloc, st, i, host, port);
-            server.start() catch |err| {
-                std.log.err("Hardware server exited: {}", .{err});
-            };
-        }
-    }.run, .{ allocator, &state, io, "0.0.0.0", hw_port });
+    // ── Hardware server ──
+    var hw_server = HardwareServer(u8, ByteParser()).init(allocator, &state, io, config.hw.host, config.hw.port);
+    defer hw_server.deinit();
 
-    pc_thread.join();
-    hw_thread.join();
+    // 并发运行两个 server，async 返回 Future，await 阻塞直到完成
+    var pc_future = Io.async(io, runPcServer, .{&pc_server});
+    var hw_future = Io.async(io, runHardwareServer, .{&hw_server});
+
+    // 阻塞等待（两个 server 都是死循环，相当于永远等待）
+    pc_future.await(io);
+    hw_future.await(io);
+}
+
+/// 并发运行 PC server（由 Io.async 调度）
+fn runPcServer(pc_server: *PcServer([]const u8, JsonLineParser([]const u8))) void {
+    pc_server.start() catch |err| {
+        std.log.err("PC server exited: {}", .{err});
+    };
+}
+
+/// 并发运行 hardware server（由 Io.async 调度）
+fn runHardwareServer(hw_server: *HardwareServer(u8, ByteParser())) void {
+    hw_server.start() catch |err| {
+        std.log.err("Hardware server exited: {}", .{err});
+    };
 }
 
 test {
-    _ = config.util;
-    _ = config.custom_codec;
-    _ = config.state;
-    _ = config.handler_registry;
-    _ = config.frame_decoder;
-    _ = model.pc.common_request;
-    _ = model.pc.pc_server;
-    _ = model.hardware.hardware_server;
-    _ = model.hardware.common_response;
+    _ = cfg.util;
+    _ = cfg.state;
+    _ = cfg.handler_registry;
 }
