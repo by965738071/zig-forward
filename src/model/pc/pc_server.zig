@@ -1,20 +1,17 @@
 const std = @import("std");
-const Io = std.Io;
-const net = Io.net;
 
 const GlobalState = @import("../../config/state.zig").GlobalState;
 const PcClientState = @import("../../config/state.zig").PcClientState;
 
-const readLine = @import("../../config/util.zig").readLine;
 const currentTimestamp = @import("../../config/util.zig").currentTimestamp;
-const parseClazzAndTarget = @import("common_request.zig").parseClazzAndTarget;
-const HandlerRegistry = @import("../../config/handler_registry.zig").HandlerRegistry;
+const PcDataInfo = @import("common_request.zig").PcDataInfo;
+const HandlerRegistry = @import("../../config/config.zig").HandlerRegistry;
 
 /// Context passed to each PC command handler.
 pub const PcCommandContext = struct {
-    io: Io,
+    io: std.Io,
     state: *GlobalState,
-    writer: *Io.Writer,
+    writer: *std.Io.Writer,
     pc_server: *PcServer,
     pc_id: []const u8,
     client_state: *PcClientState,
@@ -32,14 +29,14 @@ pub const CommandRegistry = HandlerRegistry([]const u8, PcCommandContext);
 /// 硬件广播通过 GlobalState.broadcastToA 直接写入 PC socket。
 allocator: std.mem.Allocator,
 state: *GlobalState,
-io: Io,
+io: std.Io,
 host: []const u8,
 port: u16,
 command_registry: CommandRegistry,
 
 pub const PcServer = @This();
 
-pub fn init(allocator: std.mem.Allocator, state: *GlobalState, io: Io, host: []const u8, port: u16) PcServer {
+pub fn init(allocator: std.mem.Allocator, state: *GlobalState, io: std.Io, host: []const u8, port: u16) PcServer {
     var self: PcServer = .{
         .allocator = allocator,
         .state = state,
@@ -59,8 +56,13 @@ pub fn init(allocator: std.mem.Allocator, state: *GlobalState, io: Io, host: []c
     return self;
 }
 
+///注册COMMAND
+pub fn registerCommand(self: *PcServer, cmd: []const u8, handler: CommandRegistry.Handler) !void {
+    try self.command_registry.register(cmd, handler);
+}
+
 pub fn start(self: *PcServer) !void {
-    const addr = try net.IpAddress.parseIp4(self.host, self.port);
+    const addr = try std.Io.net.IpAddress.parseIp4(self.host, self.port);
     var server = try addr.listen(self.io, .{});
     defer server.deinit(self.io);
 
@@ -68,11 +70,9 @@ pub fn start(self: *PcServer) !void {
 
     while (true) {
         const stream = try server.accept(self.io);
-        const peer_id = try std.fmt.allocPrint(self.allocator, "{}", .{stream.socket.address});
-        std.log.info("PC client {s} connected", .{peer_id});
+        std.log.info("PC client connected", .{});
 
-        _ = Io.concurrent(self.io, handlePcClient, .{ self, stream, peer_id }) catch |err| {
-            self.allocator.free(peer_id);
+        _ = std.Io.concurrent(self.io, handlePcClient, .{ self, stream }) catch |err| {
             stream.close(self.io);
             std.log.err("spawn PC handler: {}", .{err});
             continue;
@@ -80,18 +80,19 @@ pub fn start(self: *PcServer) !void {
     }
 }
 
-fn handlePcClient(pc_server: *PcServer, stream: net.Stream, pc_id: []const u8) void {
-    defer pc_server.allocator.free(pc_id);
-
-    handlePcClientInner(pc_server, stream, pc_id) catch |err| {
-        std.log.err("PC {s} disconnected ({})", .{ pc_id, err });
+fn handlePcClient(pc_server: *PcServer, stream: std.Io.net.Stream) void {
+    handlePcClientInner(pc_server, stream) catch |err| {
+        std.log.err("PC client disconnected ({})", .{err});
     };
 }
 
-fn handlePcClientInner(pc_server: *PcServer, stream: net.Stream, pc_id: []const u8) !void {
+fn handlePcClientInner(pc_server: *PcServer, stream: std.Io.net.Stream) !void {
     const allocator = pc_server.allocator;
     const io = pc_server.io;
     const state = pc_server.state;
+
+    const pc_id = try std.fmt.allocPrint(allocator, "{}", .{stream.socket.address});
+    defer allocator.free(pc_id);
 
     const client_state = try allocator.create(PcClientState);
     client_state.* = .{
@@ -123,14 +124,9 @@ fn handlePcClientInner(pc_server: *PcServer, stream: net.Stream, pc_id: []const 
     const writer = &writer_io.interface;
 
     while (true) {
-        const owned = try readLine(reader, allocator);
-        defer allocator.free(owned);
+        var pc_data_info = try PcDataInfo.init(reader, allocator);
+        defer pc_data_info.deinit();
 
-        // Quick parse: extract clazz + target_addr, no tagged union
-        const parsed = try parseClazzAndTarget(owned, allocator);
-        defer allocator.free(parsed.target_addr);
-
-        // Set up dispatch context
         var ctx = PcCommandContext{
             .io = io,
             .state = state,
@@ -140,17 +136,13 @@ fn handlePcClientInner(pc_server: *PcServer, stream: net.Stream, pc_id: []const 
             .client_state = client_state,
             .first = &first,
             .registered_addr = &target_addr,
-            .cmd_target = parsed.target_addr,
+            .cmd_target = pc_data_info.target_addr,
         };
 
-        // Dispatch by clazz
-        // - handler matched, returns JSON → send to client
-        // - handler matched, returns null → handled, no response needed (forward success)
-        // - no handler matched → default handler (forward) is called, same rules above
         const response = try pc_server.command_registry.dispatch(
             &ctx,
-            parsed.clazz,
-            owned,
+
+            pc_data_info.raw,
             allocator,
         );
         if (response) |json| {

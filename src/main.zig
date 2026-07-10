@@ -8,7 +8,7 @@ const PcServer = model.pc.pc_server.PcServer;
 const HardwareServer = model.hardware.hardware_server.HardwareServer;
 
 pub fn main(init: std.process.Init) !void {
-    //const allocator = init.arena.allocator();
+    _ = init;
     var debug_allocator = std.heap.DebugAllocator(.{}){};
     const allocator = debug_allocator.allocator();
 
@@ -20,7 +20,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // ── Global state ──
-    var state = GlobalState.init(init.arena.allocator());
+    var state = GlobalState.init(allocator);
     defer state.deinit();
 
     // ── Single Io backend for the entire application ──

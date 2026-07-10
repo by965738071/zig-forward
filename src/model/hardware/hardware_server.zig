@@ -67,14 +67,9 @@ pub fn start(self: *HardwareServer) !void {
 
     while (true) {
         const stream = try server.accept(self.io);
-        const ip = stream.socket.address.ip4;
-        const hw_id = try std.fmt.allocPrint(self.allocator, "{d}.{d}.{d}.{d}:{d}", .{
-            ip.bytes[0], ip.bytes[1], ip.bytes[2], ip.bytes[3], ip.port,
-        });
-        std.log.info("Hardware device {s} connected", .{hw_id});
+        std.log.info("Hardware device connected", .{});
 
-        _ = Io.concurrent(self.io, handleHardware, .{ self, stream, hw_id }) catch |err| {
-            self.allocator.free(hw_id);
+        _ = Io.concurrent(self.io, handleHardware, .{ self, stream }) catch |err| {
             stream.close(self.io);
             std.log.err("spawn hardware handler: {}", .{err});
             continue;
@@ -82,18 +77,22 @@ pub fn start(self: *HardwareServer) !void {
     }
 }
 
-fn handleHardware(hw_server: *HardwareServer, stream: net.Stream, hw_id: []const u8) void {
-    defer hw_server.allocator.free(hw_id);
-
-    handleHardwareInner(hw_server, stream, hw_id) catch |err| {
-        std.log.err("Hardware {s} disconnected ({})", .{ hw_id, err });
+fn handleHardware(hw_server: *HardwareServer, stream: net.Stream) void {
+    handleHardwareInner(hw_server, stream) catch |err| {
+        std.log.err("Hardware device disconnected ({})", .{err});
     };
 }
 
-fn handleHardwareInner(hw_server: *HardwareServer, stream: net.Stream, hw_id: []const u8) !void {
+fn handleHardwareInner(hw_server: *HardwareServer, stream: net.Stream) !void {
     const allocator = hw_server.allocator;
     const io = hw_server.io;
     const state = hw_server.state;
+
+    const ip = stream.socket.address.ip4;
+    const hw_id = try std.fmt.allocPrint(allocator, "{d}.{d}.{d}.{d}:{d}", .{
+        ip.bytes[0], ip.bytes[1], ip.bytes[2], ip.bytes[3], ip.port,
+    });
+    defer allocator.free(hw_id);
 
     // ── 1. 创建并注册硬件状态 ──
     const hw_state = try allocator.create(PcClientState);
