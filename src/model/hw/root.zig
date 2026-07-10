@@ -1,1 +1,1 @@
-pub const hardware_server = @import("hw_server.zig");
+pub const hw_server = @import("hw_server.zig");

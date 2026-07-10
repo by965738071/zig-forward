@@ -122,7 +122,7 @@ pub fn PcServer(comptime IdType: type, comptime Parser: type) type {
 
                 // 先转发给硬件设备，再执行本地 handler
                 state.sendToC(io, target_addr.?, pc_id, frame.data) catch |err| {
-                    std.log.warn("forward to hardware failed: {}", .{err});
+                    std.log.warn("forward to HW failed: {}", .{err});
                 };
 
                 const response = try self.dispatch(

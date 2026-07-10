@@ -29,7 +29,7 @@ pub fn main() !void {
     std.debug.print("\n=== Zig Forward Integration Test ===\n", .{});
     std.debug.print("  Connecting to PC:{d}  HW:{d} ...\n", .{ pc_port, hw_port });
 
-    // ── Connect 2 hardware devices ──
+    // ── Connect 2 HW devices ──
     var hw1 = try TcpClient.connect("127.0.0.1", hw_port, io);
     errdefer hw1.close(io);
     const ip1 = hw1.stream.socket.address.ip4;
@@ -77,7 +77,7 @@ pub fn main() !void {
     std.debug.print("  ✓ PASS\n", .{});
 
     // ═══════════════════════════════════════════════════
-    // TEST 3: HW1 broadcast → PC1 + PC2 receive (HardwareResponse/hex)
+    // TEST 3: HW1 broadcast → PC1 + PC2 receive (HwResponse/hex)
     // ═══════════════════════════════════════════════════
     std.debug.print("\n── Test 3: HW1 sends → PC1, PC2 receive hex ──\n", .{});
     {

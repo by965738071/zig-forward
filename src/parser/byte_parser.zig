@@ -1,6 +1,6 @@
 const std = @import("std");
 
-/// 二进制协议 Parser，用于 HardwareServer。
+/// 二进制协议 Parser，用于 HwServer。
 ///
 /// 帧格式：
 ///   [55 AA] [type:1] [length:4 LE] [payload:N] [checksum:2]

@@ -3,7 +3,7 @@ const Io = std.Io;
 
 const GlobalState = @import("config").state.GlobalState;
 const PcServer = @import("pc_server").pc_server.PcServer;
-const HardwareServer = @import("hw_server").hardware_server.HardwareServer;
+const HwServer = @import("hw_server").hw_server.HwServer;
 const JsonLineParser = @import("parser").json_parser.JsonLineParser;
 const ByteParser = @import("parser").byte_parser.ByteParser;
 const cfg = @import("config");
@@ -30,7 +30,7 @@ pub fn main(init: std.process.Init) !void {
     var backend = Io.Threaded.init(allocator, .{});
     const io = backend.io();
 
-    std.log.info("Zig Forward starting — PC:{d}  Hardware:{d}", .{ config.pc.port, config.hw.port });
+    std.log.info("Zig Forward starting — PC:{d}  HW:{d}", .{ config.pc.port, config.hw.port });
 
     // ── PC server ──
     var pc_server = PcServer([]const u8, JsonLineParser([]const u8))
@@ -41,13 +41,13 @@ pub fn main(init: std.process.Init) !void {
         pc_server.registerCommand(cmd.name, cmd.handler) catch {};
     }
 
-    // ── Hardware server ──
-    var hw_server = HardwareServer(u8, ByteParser()).init(allocator, &state, io, config.hw.host, config.hw.port);
+    // ── HW server ──
+    var hw_server = HwServer(u8, ByteParser()).init(allocator, &state, io, config.hw.host, config.hw.port);
     defer hw_server.deinit();
 
     // 并发运行两个 server，async 返回 Future，await 阻塞直到完成
     var pc_future = Io.async(io, runPcServer, .{&pc_server});
-    var hw_future = Io.async(io, runHardwareServer, .{&hw_server});
+    var hw_future = Io.async(io, runHwServer, .{&hw_server});
 
     // 阻塞等待（两个 server 都是死循环，相当于永远等待）
     pc_future.await(io);
@@ -61,10 +61,10 @@ fn runPcServer(pc_server: *PcServer([]const u8, JsonLineParser([]const u8))) voi
     };
 }
 
-/// 并发运行 hardware server（由 Io.async 调度）
-fn runHardwareServer(hw_server: *HardwareServer(u8, ByteParser())) void {
+/// 并发运行 HW server（由 Io.async 调度）
+fn runHwServer(hw_server: *HwServer(u8, ByteParser())) void {
     hw_server.start() catch |err| {
-        std.log.err("Hardware server exited: {}", .{err});
+        std.log.err("HW server exited: {}", .{err});
     };
 }
 

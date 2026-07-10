@@ -14,7 +14,7 @@ const HandlerRegistry = @import("config").handler_registry.HandlerRegistry;
 ///   - `deinit(self) void`
 ///   - `parse(self, reader, allocator) !?Frame`
 ///     Frame 必须有 `id: IdType`、`data: []const u8`、`deinit(self) void`
-pub fn HardwareServer(comptime IdType: type, comptime Parser: type) type {
+pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
     return struct {
         const Self = @This();
         pub const Handler = HandlerRegistry(IdType, Io).Handler;
@@ -46,27 +46,27 @@ pub fn HardwareServer(comptime IdType: type, comptime Parser: type) type {
             var server = try addr.listen(self.io, .{});
             defer server.deinit(self.io);
 
-            std.log.info("Hardware server listening on {s}:{d}", .{ self.host, self.port });
+            std.log.info("HW server listening on {s}:{d}", .{ self.host, self.port });
 
             while (true) {
                 const stream = try server.accept(self.io);
-                std.log.info("Hardware device connected", .{});
+                std.log.info("HW device connected", .{});
 
-                _ = Io.concurrent(self.io, handleHardware, .{ self, stream }) catch |err| {
+                _ = Io.concurrent(self.io, handleHw, .{ self, stream }) catch |err| {
                     stream.close(self.io);
-                    std.log.err("spawn hardware handler: {}", .{err});
+                    std.log.err("spawn HW handler: {}", .{err});
                     continue;
                 };
             }
         }
 
-        fn handleHardware(hw_server: *Self, stream: net.Stream) void {
-            handleHardwareInner(hw_server, stream) catch |err| {
-                std.log.err("Hardware device disconnected ({})", .{err});
+        fn handleHw(hw_server: *Self, stream: net.Stream) void {
+            handleHwInner(hw_server, stream) catch |err| {
+                std.log.err("HW device disconnected ({})", .{err});
             };
         }
 
-        fn handleHardwareInner(hw_server: *Self, stream: net.Stream) !void {
+        fn handleHwInner(hw_server: *Self, stream: net.Stream) !void {
             const allocator = hw_server.allocator;
             const io = hw_server.io;
             const state = hw_server.state;
@@ -88,7 +88,7 @@ pub fn HardwareServer(comptime IdType: type, comptime Parser: type) type {
             };
 
             try state.setCSender(io, hw_id, hw_state);
-            std.log.info("Hardware {s} connected and registered", .{hw_id});
+            std.log.info("HW {s} connected and registered", .{hw_id});
 
             defer {
                 state.removeGroup(io, hw_id);

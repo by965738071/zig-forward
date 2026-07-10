@@ -7,7 +7,7 @@ const currentTimestamp = @import("util.zig").currentTimestamp;
 pub const LEASE_DURATION_MS: i64 = 5000;
 
 /// Per-connection state shared via GlobalState.
-/// Used for both PC clients and hardware connections.
+/// Used for both PC clients and HW connections.
 pub const PcClientState = struct {
     stream: net.Stream,
     io: Io,
@@ -16,7 +16,7 @@ pub const PcClientState = struct {
     pc_id: []const u8,
 };
 
-/// A group associates one hardware device (C-side) with zero or more PC
+/// A group associates one HW device (C-side) with zero or more PC
 /// control clients (A-side).
 pub const Group = struct {
     a_clients: std.StringHashMap(*PcClientState),
@@ -68,7 +68,7 @@ pub const GlobalState = struct {
         self.groups.deinit();
     }
 
-    /// Register (or replace) a hardware device (C-side).
+    /// Register (or replace) a HW device (C-side).
     pub fn setCSender(self: *GlobalState, io: Io, addr: []const u8, sender: *PcClientState) !void {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
@@ -90,7 +90,7 @@ pub const GlobalState = struct {
         try self.groups.put(key, group);
     }
 
-    /// Add a PC client to an existing hardware group.
+    /// Add a PC client to an existing HW group.
     pub fn addAClient(
         self: *GlobalState,
         io: Io,
@@ -102,17 +102,17 @@ pub const GlobalState = struct {
         defer self.mutex.unlock(io);
 
         const group_ptr = self.groups.get(target_addr) orelse {
-            std.log.warn("hardware not connected: {s}", .{target_addr});
-            return error.HardwareNotConnected;
+            std.log.warn("hw not connected: {s}", .{target_addr});
+            return error.HwNotConnected;
         };
 
         const key = try self.allocator.dupe(u8, a_id);
         errdefer self.allocator.free(key);
         try group_ptr.a_clients.put(key, client);
-        std.log.info("PC {s} -> hardware {s}", .{ a_id, target_addr });
+        std.log.info("PC {s} -> hw {s}", .{ a_id, target_addr });
     }
 
-    /// Remove a PC client from a specific hardware group.
+    /// Remove a PC client from a specific HW group.
     /// If the removed client was the control owner, control is released.
     pub fn removeAClient(self: *GlobalState, io: Io, target_addr: []const u8, a_id: []const u8) !void {
         try self.mutex.lock(io);
@@ -135,13 +135,13 @@ pub const GlobalState = struct {
 
     /// Broadcast a pre-built JSON string to all PC clients in a group.
     /// 先收集客户端快照再释放锁，逐个无锁写入，避免持锁阻塞整个 GlobalState。
-    pub fn broadcastToA(self: *GlobalState, io: Io, hardware_addr: []const u8, json: []const u8) !void {
+    pub fn broadcastToA(self: *GlobalState, io: Io, hw_addr: []const u8, json: []const u8) !void {
         // 1. 持锁收集客户端快照
         const clients = blk: {
             try self.mutex.lock(io);
             defer self.mutex.unlock(io);
 
-            const group = self.groups.get(hardware_addr) orelse return;
+            const group = self.groups.get(hw_addr) orelse return;
 
             var list: std.ArrayList(*PcClientState) = .empty;
             var it = group.a_clients.iterator();
@@ -164,14 +164,14 @@ pub const GlobalState = struct {
         }
     }
 
-    /// Request control of a hardware group (Layer 1+2).
+    /// Request control of a HW group (Layer 1+2).
     /// Returns `true` if control granted, `false` if already taken.
     /// Automatically releases expired leases.
     pub fn requestControl(self: *GlobalState, io: Io, target_addr: []const u8, pc_id: []const u8) !bool {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
 
-        const group = self.groups.get(target_addr) orelse return error.HardwareNotConnected;
+        const group = self.groups.get(target_addr) orelse return error.HwNotConnected;
 
         if (group.owner) |o| {
             if (currentTimestamp(io) < group.lease_expiry) {
@@ -187,7 +187,7 @@ pub const GlobalState = struct {
         return true;
     }
 
-    /// Release control of a hardware group (Layer 1).
+    /// Release control of a HW group (Layer 1).
     pub fn releaseControl(self: *GlobalState, io: Io, target_addr: []const u8) void {
         self.mutex.lock(io) catch return;
         defer self.mutex.unlock(io);
@@ -206,7 +206,7 @@ pub const GlobalState = struct {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
 
-        const group = self.groups.get(target_addr) orelse return error.HardwareNotConnected;
+        const group = self.groups.get(target_addr) orelse return error.HwNotConnected;
 
         if (group.owner) |o| {
             if (std.mem.eql(u8, o, pc_id)) {
@@ -222,7 +222,7 @@ pub const GlobalState = struct {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
 
-        const group = self.groups.get(target_addr) orelse return error.HardwareNotConnected;
+        const group = self.groups.get(target_addr) orelse return error.HwNotConnected;
 
         if (group.owner) |o| {
             if (currentTimestamp(io) >= group.lease_expiry) {
@@ -235,13 +235,13 @@ pub const GlobalState = struct {
         return group.owner;
     }
 
-    /// Forward a message from a PC client to the hardware device.
+    /// Forward a message from a PC client to the HW device.
     /// Only the current control owner may forward; lease is auto-renewed.
     pub fn sendToC(self: *GlobalState, io: Io, target_addr: []const u8, pc_id: []const u8, msg: []const u8) !void {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
 
-        const group = self.groups.get(target_addr) orelse return error.HardwareNotConnected;
+        const group = self.groups.get(target_addr) orelse return error.HwNotConnected;
 
         if (group.owner) |o| {
             if (currentTimestamp(io) >= group.lease_expiry) {
@@ -269,7 +269,7 @@ pub const GlobalState = struct {
         try w.flush();
     }
 
-    /// Remove an entire hardware group (when the hardware device disconnects).
+    /// Remove an entire HW group (when the HW device disconnects).
     pub fn removeGroup(self: *GlobalState, io: Io, addr: []const u8) void {
         self.mutex.lock(io) catch return;
         defer self.mutex.unlock(io);

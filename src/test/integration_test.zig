@@ -8,9 +8,9 @@ const PcServer = app.model.pc.pc_server.PcServer;
 
 // ── Minimal integration test: PC server only ──
 // Verifies the server accepts a connection and handles a Register
-// to a non-existent hardware address without crashing.
+// to a non-existent hw address without crashing.
 
-test "pc register fails when hardware not connected" {
+test "pc register fails when hw not connected" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
