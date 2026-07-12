@@ -10,10 +10,13 @@ pub fn ByteParser() type {
     return struct {
         pub const Frame = struct {
             id: u8,
+            addrs: []const []const u8,
             data: []const u8,
             allocator: std.mem.Allocator,
 
             pub fn deinit(self: *@This()) void {
+                for (self.addrs) |a| self.allocator.free(a);
+                self.allocator.free(self.addrs);
                 self.allocator.free(self.data);
             }
         };
@@ -89,7 +92,23 @@ pub fn ByteParser() type {
                 return try self.tryExtractFrame(allocator);
             }
 
-            // 提取完整帧
+            // 提取 addrs（payload 中以空字符分隔的多个地址）
+            const payload_start = 2 + 1 + 4; // header + type + length
+            const payload = self.buf.items[payload_start .. payload_start + payload_len];
+
+            var addrs_list = std.ArrayList([]const u8).empty;
+            defer addrs_list.deinit(allocator);
+            {
+                var offset: usize = 0;
+                while (offset < payload.len and payload[offset] != 0) {
+                    const end = std.mem.indexOfScalar(u8, payload[offset..], 0) orelse payload.len;
+                    try addrs_list.append(allocator, try allocator.dupe(u8, payload[offset..end]));
+                    offset = end + 1;
+                }
+            }
+            const addrs = try addrs_list.toOwnedSlice(allocator);
+
+            // data = 完整包数据
             const packet = try allocator.dupe(u8, self.buf.items[0..total_len]);
 
             // 移除已消耗的字节
@@ -98,7 +117,7 @@ pub fn ByteParser() type {
             }
             self.buf.shrinkRetainingCapacity(self.buf.items.len - total_len);
 
-            return Frame{ .id = packet_type, .data = packet, .allocator = allocator };
+            return Frame{ .id = packet_type, .addrs = addrs, .data = packet, .allocator = allocator };
         }
     };
 }

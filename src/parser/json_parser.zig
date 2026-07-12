@@ -3,13 +3,31 @@ const readLine = @import("config").util.readLine;
 
 pub fn JsonLineParser(comptime IdType: type) type {
     return struct {
-        cmd: IdType,
-        addr: []const u8,
-        data: []const u8,
-        allocator: std.mem.Allocator,
+        pub const Frame = struct {
+            id: IdType,
+            addrs: []const []const u8,
+            data: []const u8,
+            allocator: std.mem.Allocator,
 
-        pub fn parse(reader: *std.Io.Reader, allocator: std.mem.Allocator) !@This() {
-            const raw = try readLine(reader, allocator);
+            pub fn deinit(self: *@This()) void {
+                if (comptime IdType == []const u8) self.allocator.free(self.id);
+                for (self.addrs) |a| self.allocator.free(a);
+                self.allocator.free(self.addrs);
+                self.allocator.free(self.data);
+            }
+        };
+
+        pub fn init(_: std.mem.Allocator) @This() {
+            return .{};
+        }
+
+        pub fn deinit(_: *@This()) void {}
+
+        pub fn parse(_: *@This(), reader: *std.Io.Reader, allocator: std.mem.Allocator) !?Frame {
+            const raw = readLine(reader, allocator) catch |err| {
+                if (err == error.EndOfStream) return null;
+                return err;
+            };
             errdefer allocator.free(raw);
 
             const parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
@@ -22,22 +40,34 @@ pub fn JsonLineParser(comptime IdType: type) type {
 
             const cmd_val = obj.get("cmd") orelse return error.MissingField;
             const addr_val = obj.get("addr") orelse return error.MissingField;
-            if (addr_val.string.len == 0) return error.InvalidAddr;
 
-            const cmd: IdType = try parseCmd(cmd_val, allocator);
+            const id: IdType = try parseCmd(cmd_val, allocator);
 
-            return .{
-                .cmd = cmd,
-                .addr = try allocator.dupe(u8, addr_val.string),
+            var addrs_list = std.ArrayList([]const u8).empty;
+            defer addrs_list.deinit(allocator);
+            switch (addr_val) {
+                .string => |s| {
+                    if (s.len == 0) return error.InvalidAddr;
+                    try addrs_list.append(allocator, try allocator.dupe(u8, s));
+                },
+                .array => |arr| {
+                    if (arr.items.len == 0) return error.InvalidAddr;
+                    for (arr.items) |item| {
+                        const s = item.string;
+                        if (s.len == 0) return error.InvalidAddr;
+                        try addrs_list.append(allocator, try allocator.dupe(u8, s));
+                    }
+                },
+                else => return error.InvalidAddr,
+            }
+            const addrs = try addrs_list.toOwnedSlice(allocator);
+
+            return Frame{
+                .id = id,
+                .addrs = addrs,
                 .data = raw,
                 .allocator = allocator,
             };
-        }
-
-        pub fn deinit(self: *@This()) void {
-            if (comptime IdType == []const u8) self.allocator.free(self.cmd);
-            self.allocator.free(self.addr);
-            self.allocator.free(self.data);
         }
 
         fn parseCmd(val: std.json.Value, allocator: std.mem.Allocator) !IdType {

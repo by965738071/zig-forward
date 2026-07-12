@@ -236,27 +236,11 @@ pub const GlobalState = struct {
     }
 
     /// Forward a message from a PC client to the HW device.
-    /// Only the current control owner may forward; lease is auto-renewed.
-    pub fn sendToC(self: *GlobalState, io: Io, target_addr: []const u8, pc_id: []const u8, msg: []const u8) !void {
+    pub fn sendToC(self: *GlobalState, io: Io, target_addr: []const u8, msg: []const u8) !void {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
 
         const group = self.groups.get(target_addr) orelse return error.HwNotConnected;
-
-        if (group.owner) |o| {
-            if (currentTimestamp(io) >= group.lease_expiry) {
-                self.allocator.free(o);
-                group.owner = null;
-                group.lease_expiry = 0;
-                return error.ControlLeaseExpired;
-            }
-            if (!std.mem.eql(u8, o, pc_id)) {
-                return error.NotControlOwner;
-            }
-            group.lease_expiry = currentTimestamp(io) + LEASE_DURATION_MS;
-        } else {
-            return error.NoControlOwner;
-        }
 
         const hw = group.c_sender;
         try hw.write_mutex.lock(io);

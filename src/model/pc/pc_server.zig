@@ -82,13 +82,15 @@ pub fn PcServer(comptime IdType: type, comptime Parser: type) type {
                 .pc_id = pc_id,
             };
 
-            var target_addr: ?[]u8 = null;
+            var target_addrs: std.StringHashMap(void) = .init(allocator);
 
             defer {
-                if (target_addr) |addr| {
-                    state.removeAClient(io, addr, pc_id) catch std.log.warn("failed to remove client {s} from {s}", .{ pc_id, addr });
-                    allocator.free(addr);
+                var it = target_addrs.keyIterator();
+                while (it.next()) |addr| {
+                    state.removeAClient(io, addr.*, pc_id) catch std.log.warn("failed to remove client {s} from {s}", .{ pc_id, addr.* });
+                    allocator.free(addr.*);
                 }
+                target_addrs.deinit();
                 stream.close(io);
                 allocator.destroy(client_state);
             }
@@ -100,33 +102,28 @@ pub fn PcServer(comptime IdType: type, comptime Parser: type) type {
             const reader = &reader_io.interface;
             const writer = &writer_io.interface;
 
+            var parser = Parser.init(allocator);
+            defer parser.deinit();
+
             while (true) {
-                var frame = try Parser.parse(reader, allocator);
+                var frame = try parser.parse(reader, allocator) orelse break;
                 defer frame.deinit();
 
-                // frame.deinit() 会 free addr，所以 target_addr 需要自己的副本
-                const new_addr = try allocator.dupe(u8, frame.addr);
-
-                const addr_changed = if (target_addr) |old| blk: {
-                    if (!std.mem.eql(u8, old, new_addr)) {
-                        try state.removeAClient(io, old, pc_id);
-                        allocator.free(old);
-                        break :blk true;
+                // 注册每个目标地址，并转发给硬件设备
+                for (frame.addrs) |addr| {
+                    const gop = try target_addrs.getOrPut(addr);
+                    if (!gop.found_existing) {
+                        gop.key_ptr.* = try allocator.dupe(u8, addr);
+                        try state.addAClient(io, addr, pc_id, client_state);
                     }
-                    allocator.free(old);
-                    break :blk false;
-                } else true;
 
-                target_addr = new_addr;
-                if (addr_changed) try state.addAClient(io, target_addr.?, pc_id, client_state);
-
-                // 先转发给硬件设备，再执行本地 handler
-                state.sendToC(io, target_addr.?, pc_id, frame.data) catch |err| {
-                    std.log.warn("forward to HW failed: {}", .{err});
-                };
+                    state.sendToC(io, addr, frame.data) catch |err| {
+                        std.log.warn("forward to HW failed: {}", .{err});
+                    };
+                }
 
                 const response = try self.dispatch(
-                    frame.cmd,
+                    frame.id,
                     frame.data,
                     allocator,
                 );

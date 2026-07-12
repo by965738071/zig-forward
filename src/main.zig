@@ -4,8 +4,8 @@ const Io = std.Io;
 const GlobalState = @import("config").state.GlobalState;
 const PcServer = @import("pc_server").pc_server.PcServer;
 const HwServer = @import("hw_server").hw_server.HwServer;
-const JsonLineParser = @import("parser").json_parser.JsonLineParser;
 const ByteParser = @import("parser").byte_parser.ByteParser;
+const JsonLineParser = @import("parser").json_parser.JsonLineParser;
 const cfg = @import("config");
 const ConfigType = cfg.ConfigType;
 const config: ConfigType = .{};
@@ -33,17 +33,24 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("Zig Forward starting — PC:{d}  HW:{d}", .{ config.pc.port, config.hw.port });
 
     // ── PC server ──
-    var pc_server = PcServer([]const u8, JsonLineParser([]const u8))
+    var pc_server = PcServer(u8, ByteParser())
         .init(allocator, &state, io, config);
     defer pc_server.deinit();
 
     for (config.commands) |cmd| {
-        pc_server.registerCommand(cmd.name, cmd.handler) catch {};
+        pc_server.registerCommand(cmd.id, cmd.handler) catch {};
     }
 
     // ── HW server ──
-    var hw_server = HwServer(u8, ByteParser()).init(allocator, &state, io, config.hw.host, config.hw.port);
+    var hw_server = HwServer([]const u8, JsonLineParser([]const u8)).init(allocator, &state, io, config.hw.host, config.hw.port);
     defer hw_server.deinit();
+
+    for (config.hw_commands) |cmd| {
+        hw_server.registerCommand(cmd.name, cmd.handler) catch {};
+    }
+    if (config.hw_default_handler) |h| {
+        hw_server.setDefault(h);
+    }
 
     // 并发运行两个 server，async 返回 Future，await 阻塞直到完成
     var pc_future = Io.async(io, runPcServer, .{&pc_server});
@@ -55,14 +62,14 @@ pub fn main(init: std.process.Init) !void {
 }
 
 /// 并发运行 PC server（由 Io.async 调度）
-fn runPcServer(pc_server: *PcServer([]const u8, JsonLineParser([]const u8))) void {
+fn runPcServer(pc_server: *PcServer(u8, ByteParser())) void {
     pc_server.start() catch |err| {
         std.log.err("PC server exited: {}", .{err});
     };
 }
 
 /// 并发运行 HW server（由 Io.async 调度）
-fn runHwServer(hw_server: *HwServer(u8, ByteParser())) void {
+fn runHwServer(hw_server: *HwServer([]const u8, JsonLineParser([]const u8))) void {
     hw_server.start() catch |err| {
         std.log.err("HW server exited: {}", .{err});
     };

@@ -17,14 +17,14 @@ const HandlerRegistry = @import("config").handler_registry.HandlerRegistry;
 pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
     return struct {
         const Self = @This();
-        pub const Handler = HandlerRegistry(IdType, Io).Handler;
+        pub const Handler = HandlerRegistry(IdType, void).Handler;
 
         allocator: std.mem.Allocator,
         state: *GlobalState,
         io: Io,
         host: []const u8,
         port: u16,
-        registry: HandlerRegistry(IdType, Io),
+        registry: HandlerRegistry(IdType, void),
 
         pub fn init(allocator: std.mem.Allocator, state: *GlobalState, io: Io, host: []const u8, port: u16) Self {
             return .{
@@ -33,7 +33,7 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
                 .io = io,
                 .host = host,
                 .port = port,
-                .registry = HandlerRegistry(IdType, Io).init(allocator),
+                .registry = HandlerRegistry(IdType, void).init(allocator),
             };
         }
 
@@ -58,6 +58,14 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
                     continue;
                 };
             }
+        }
+
+        pub fn registerCommand(self: *Self, cmd: IdType, handler: Handler) !void {
+            try self.registry.register(cmd, handler);
+        }
+
+        pub fn setDefault(self: *Self, handler: Handler) void {
+            self.registry.default_handler = handler;
         }
 
         fn handleHw(hw_server: *Self, stream: net.Stream) void {
@@ -109,7 +117,7 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
                 defer frame.deinit();
 
                 const result = try hw_server.registry.dispatch(
-                    io,
+                    {},
                     frame.id,
                     frame.data,
                     allocator,
