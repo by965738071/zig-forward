@@ -1,8 +1,8 @@
 const std = @import("std");
 
-pub fn HandlerRegistry(comptime IdType: type, comptime Context: type) type {
+pub fn HandlerRegistry(comptime IdType: type) type {
     return struct {
-        pub const Handler = *const fn (ctx: Context, id: IdType, data: []const u8, allocator: std.mem.Allocator) anyerror!?[]u8;
+        pub const Handler = *const fn (id: IdType, data: []const u8, allocator: std.mem.Allocator) anyerror!?[]u8;
         pub const Map = if (IdType == []const u8) std.StringHashMap(Handler) else std.AutoHashMap(IdType, Handler);
 
         allocator: std.mem.Allocator,
@@ -40,9 +40,9 @@ pub fn HandlerRegistry(comptime IdType: type, comptime Context: type) type {
             self.default_handler = handler;
         }
 
-        pub fn dispatch(self: *@This(), ctx: Context, id: IdType, data: []const u8, allocator: std.mem.Allocator) anyerror!?[]u8 {
-            if (self.map.get(id)) |handler| return handler(ctx, id, data, allocator);
-            if (self.default_handler) |h| return h(ctx, id, data, allocator);
+        pub fn dispatch(self: *@This(), id: IdType, data: []const u8, allocator: std.mem.Allocator) anyerror!?[]u8 {
+            if (self.map.get(id)) |handler| return handler(id, data, allocator);
+            if (self.default_handler) |h| return h(id, data, allocator);
             return null;
         }
     };

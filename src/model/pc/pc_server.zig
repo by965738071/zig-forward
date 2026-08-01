@@ -8,13 +8,13 @@ const Config = @import("config").ConfigType;
 
 pub fn PcServer(comptime IdType: type, comptime Parser: type) type {
     return struct {
-        pub const Handler = HandlerRegistry(IdType, void).Handler;
+        pub const Handler = HandlerRegistry(IdType).Handler;
 
         allocator: std.mem.Allocator,
         state: *GlobalState,
         io: std.Io,
         config: Config,
-        registry: HandlerRegistry(IdType, void),
+        registry: HandlerRegistry(IdType),
 
         const Self = @This();
 
@@ -24,7 +24,7 @@ pub fn PcServer(comptime IdType: type, comptime Parser: type) type {
                 .state = state,
                 .io = io,
                 .config = config,
-                .registry = HandlerRegistry(IdType, void).init(allocator),
+                .registry = HandlerRegistry(IdType).init(allocator),
             };
         }
 
@@ -37,7 +37,7 @@ pub fn PcServer(comptime IdType: type, comptime Parser: type) type {
         }
 
         pub fn dispatch(self: *Self, cmd: IdType, data: []const u8, allocator: std.mem.Allocator) anyerror!?[]u8 {
-            return self.registry.dispatch({}, cmd, data, allocator);
+            return self.registry.dispatch(cmd, data, allocator);
         }
 
         pub fn start(self: *Self) !void {
@@ -49,20 +49,20 @@ pub fn PcServer(comptime IdType: type, comptime Parser: type) type {
 
             while (true) {
                 const stream = try server.accept(self.io);
-                std.log.info("PC client connected", .{});
+                std.log.info("PC client connected ip ={f}", .{stream.socket.address});
 
-                _ = std.Io.concurrent(self.io, handlePcClient, .{ self, stream }) catch |err| {
+                 _ = std.Io.concurrent(self.io, struct {
+                    fn run(s: *Self, st: std.Io.net.Stream) void {
+                        s.handlePcClientInner(st) catch |err| {
+                            std.log.warn("PC client disconnected ({})", .{err});
+                        };
+                    }
+                }.run, .{ self, stream }) catch |err| {
                     stream.close(self.io);
                     std.log.err("spawn PC handler: {}", .{err});
                     continue;
                 };
             }
-        }
-
-        fn handlePcClient(self: *Self, stream: std.Io.net.Stream) void {
-            handlePcClientInner(self, stream) catch |err| {
-                std.log.warn("PC client disconnected ({})", .{err});
-            };
         }
 
         fn handlePcClientInner(self: *Self, stream: std.Io.net.Stream) !void {

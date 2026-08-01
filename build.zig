@@ -36,6 +36,15 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const util_mod = b.createModule(.{
+        .root_source_file = b.path("src/util.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "config", .module = config_mod },
+        },
+    });
+
     const exe = b.addExecutable(.{
         .name = "zig_forward",
         .root_module = b.createModule(.{
@@ -47,6 +56,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "pc_server", .module = pc_server_mod },
                 .{ .name = "hw_server", .module = hw_server },
                 .{ .name = "parser", .module = parser_mod },
+                .{ .name = "util", .module = util_mod },
             },
         }),
     });
@@ -74,6 +84,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "pc_server", .module = pc_server_mod },
             .{ .name = "hw_server", .module = hw_server },
             .{ .name = "parser", .module = parser_mod },
+            .{ .name = "util", .module = util_mod },
         },
     });
 

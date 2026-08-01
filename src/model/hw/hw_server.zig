@@ -17,14 +17,14 @@ const HandlerRegistry = @import("config").handler_registry.HandlerRegistry;
 pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
     return struct {
         const Self = @This();
-        pub const Handler = HandlerRegistry(IdType, void).Handler;
+        pub const Handler = HandlerRegistry(IdType).Handler;
 
         allocator: std.mem.Allocator,
         state: *GlobalState,
         io: Io,
         host: []const u8,
         port: u16,
-        registry: HandlerRegistry(IdType, void),
+        registry: HandlerRegistry(IdType),
 
         pub fn init(allocator: std.mem.Allocator, state: *GlobalState, io: Io, host: []const u8, port: u16) Self {
             return .{
@@ -33,7 +33,7 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
                 .io = io,
                 .host = host,
                 .port = port,
-                .registry = HandlerRegistry(IdType, void).init(allocator),
+                .registry = HandlerRegistry(IdType).init(allocator),
             };
         }
 
@@ -52,7 +52,13 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
                 const stream = try server.accept(self.io);
                 std.log.info("HW device connected", .{});
 
-                _ = Io.concurrent(self.io, handleHw, .{ self, stream }) catch |err| {
+                _ = Io.concurrent(self.io, struct {
+                    fn run(s: *Self, st: net.Stream) void {
+                        s.handleHwInner(st) catch |err| {
+                            std.log.warn("HW device disconnected ({})", .{err});
+                        };
+                    }
+                }.run, .{ self, stream }) catch |err| {
                     stream.close(self.io);
                     std.log.err("spawn HW handler: {}", .{err});
                     continue;
@@ -66,12 +72,6 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
 
         pub fn setDefault(self: *Self, handler: Handler) void {
             self.registry.default_handler = handler;
-        }
-
-        fn handleHw(hw_server: *Self, stream: net.Stream) void {
-            handleHwInner(hw_server, stream) catch |err| {
-                std.log.warn("HW device disconnected ({})", .{err});
-            };
         }
 
         fn handleHwInner(hw_server: *Self, stream: net.Stream) !void {
@@ -117,7 +117,6 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
                 defer frame.deinit();
 
                 const result = try hw_server.registry.dispatch(
-                    {},
                     frame.id,
                     frame.data,
                     allocator,

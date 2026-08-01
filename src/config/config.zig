@@ -4,7 +4,7 @@ const HandlerRegistry = @import("handler_registry.zig").HandlerRegistry;
 // ── PC 端 ────────────────────────────────
 
 /// PC 命令处理函数签名（IdType = u8，二进制协议）
-pub const HandlerFn = HandlerRegistry(u8, void).Handler;
+pub const HandlerFn = HandlerRegistry(u8).Handler;
 
 /// PC 命令条目
 pub const CommandEntry = struct {
@@ -15,7 +15,7 @@ pub const CommandEntry = struct {
 // ── HW 端 ────────────────────────────────
 
 /// HW 命令处理函数签名
-pub const HwHandlerFn = HandlerRegistry([]const u8, void).Handler;
+pub const HwHandlerFn = HandlerRegistry([]const u8).Handler;
 
 /// HW 命令条目
 pub const HwCommandEntry = struct {
@@ -26,25 +26,25 @@ pub const HwCommandEntry = struct {
 // ── 处理函数 ─────────────────────────────
 
 // PC handler
-fn handleBoxStatus(_: void, cmd: u8, data: []const u8, alloc: std.mem.Allocator) anyerror!?[]u8 {
+fn handleBoxStatus(cmd: u8, data: []const u8, alloc: std.mem.Allocator) anyerror!?[]u8 {
     _ = data;
     const result = try std.fmt.allocPrint(alloc, "boxStatus ok cmd={}", .{cmd});
     return @as(?[]u8, result);
 }
 
-fn handleBoxVoltage(_: void, cmd: u8, data: []const u8, alloc: std.mem.Allocator) anyerror!?[]u8 {
+fn handleBoxVoltage(cmd: u8, data: []const u8, alloc: std.mem.Allocator) anyerror!?[]u8 {
     _ = data;
     const result = try std.fmt.allocPrint(alloc, "boxVoltage ok cmd={}", .{cmd});
     return @as(?[]u8, result);
 }
 
 // HW 默认处理：收到啥广播啥
-fn hwDefaultHandler(_: void, _: []const u8, data: []const u8, allocator: std.mem.Allocator) anyerror!?[]u8 {
+fn hwDefaultHandler(_: []const u8, data: []const u8, allocator: std.mem.Allocator) anyerror!?[]u8 {
     const result = try allocator.dupe(u8, data);
     return @as(?[]u8, result);
 }
 
-fn handleHwBox(_: void, _: []const u8, data: []const u8, allocator: std.mem.Allocator) anyerror!?[]u8 {
+fn handleHwBox(_: []const u8, data: []const u8, allocator: std.mem.Allocator) anyerror!?[]u8 {
     const result = try std.fmt.allocPrint(allocator, "{{\"from\":\"hw\",\"data\":\"{s}\"}}", .{data});
     return @as(?[]u8, result);
 }
