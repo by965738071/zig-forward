@@ -86,6 +86,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/test/integration_test_main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
         .imports = &.{
             .{ .name = "app", .module = app_mod },
             .{ .name = "config", .module = config_mod },
@@ -108,6 +109,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/test/benchmark_main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     bench_mod.addImport("app", app_mod);
     bench_mod.addImport("config", config_mod);
