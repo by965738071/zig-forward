@@ -6,28 +6,19 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  # 使用的 Zig 版本。如果 ziglang/setup-zig 找不到这个 exact build，
-  # 可以改成 0.17.0-dev（最新 0.17 开发版）或 master（最新主线）。
-  ZIG_VERSION: 0.17.0-dev.1509+bb296ab9b
-
 jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ziglang/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
+      - uses: mlugg/setup-zig@v2
       - run: zig fmt --check .
 
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: ziglang/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
+      - uses: mlugg/setup-zig@v2
       - run: zig build
       - run: zig build test
 
@@ -36,9 +27,7 @@ jobs:
     needs: [build]
     steps:
       - uses: actions/checkout@v4
-      - uses: ziglang/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
+      - uses: mlugg/setup-zig@v2
       - run: zig build
       - name: Run integration test
         run: |
@@ -55,9 +44,7 @@ jobs:
     needs: [build]
     steps:
       - uses: actions/checkout@v4
-      - uses: ziglang/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
+      - uses: mlugg/setup-zig@v2
       - run: zig build -Doptimize=ReleaseFast
       - name: Run benchmark
         run: |
