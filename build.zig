@@ -69,36 +69,37 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "config", .module = config_mod },
+            .{ .name = "pc_server", .module = pc_server_mod },
+            .{ .name = "hw_server", .module = hw_server },
+            .{ .name = "parser", .module = parser_mod },
+        },
     });
 
-    // ── Integration test (zig build test) ──
-    const integ_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/test/integration_test.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    integ_test_mod.addImport("app", app_mod);
-
-    const integ_test = b.addTest(.{ .root_module = integ_test_mod });
-    const run_integ_test = b.addRunArtifact(integ_test);
-
-    const test_step = b.step("test", "Run tests");
+    const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_tests.step);
-    test_step.dependOn(&run_integ_test.step);
 
     // ── Integration test executable (zig build integ) ──
+    // Requires the server to be running (start with `zig build run`).
     const integ_exe_mod = b.createModule(.{
         .root_source_file = b.path("src/test/integration_test_main.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "app", .module = app_mod },
+            .{ .name = "config", .module = config_mod },
+            .{ .name = "pc_server", .module = pc_server_mod },
+            .{ .name = "hw_server", .module = hw_server },
+            .{ .name = "parser", .module = parser_mod },
+        },
     });
-    integ_exe_mod.addImport("app", app_mod);
 
     const integ_exe = b.addExecutable(.{
         .name = "integ_test",
         .root_module = integ_exe_mod,
     });
-    const integ_step = b.step("integ", "Run integration test");
+    const integ_step = b.step("integ", "Run integration test (requires server)");
     const integ_cmd = b.addRunArtifact(integ_exe);
     integ_step.dependOn(&integ_cmd.step);
 
@@ -109,6 +110,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     bench_mod.addImport("app", app_mod);
+    bench_mod.addImport("config", config_mod);
+    bench_mod.addImport("pc_server", pc_server_mod);
+    bench_mod.addImport("hw_server", hw_server);
+    bench_mod.addImport("parser", parser_mod);
 
     const bench_exe = b.addExecutable(.{
         .name = "benchmark",

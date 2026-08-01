@@ -3,6 +3,7 @@
 ![Zig](https://img.shields.io/badge/Zig-0.17.0--dev-F7A41D?logo=zig&labelColor=000)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![TCP](https://img.shields.io/badge/protocol-TCP-blue)
+[![CI](https://github.com/by/zig-forward/actions/workflows/ci.yml/badge.svg)](https://github.com/by/zig-forward/actions/workflows/ci.yml)
 
 一个基于 Zig 实现的高性能 TCP 转发/代理服务，提取自火箭测试平台硬件通信中间件。
 
@@ -68,26 +69,29 @@ PC → JSON 命令 → parseCommand → sendToC → 硬件 socket
 | 模块 | 路径 | 职责 |
 |------|------|------|
 | `GlobalState` | `config/state.zig` | 全局状态管理，硬件-PC 分组，线程安全 |
-| `HardwareServer` | `model/hardware/hardware_server.zig` | 硬件连接管理，二进制协议解析，JSON 广播 |
 | `PcServer` | `model/pc/pc_server.zig` | PC 连接管理，JSON 命令处理，指令转发 |
-| `custom_codec` | `config/custom_codec.zig` | 自定义二进制协议编码/解码（流式） |
-| `common_response` | `model/hardware/common_response.zig` | 硬件响应结构化解析 |
-| `common_request` | `model/pc/common_request.zig` | PC 命令 JSON 解析 |
+| `HwServer` | `model/hw/hw_server.zig` | 硬件连接管理，二进制协议解析，JSON 广播 |
+| `custom_codec` | `config/custom_codec.zig` | 自定义二进制协议编码/解码 |
+| `ByteParser` | `parser/byte_parser.zig` | 二进制协议流式解析 |
+| `JsonLineParser` | `parser/json_parser.zig` | JSON 行协议解析 |
+| `HandlerRegistry` | `config/handler_registry.zig` | 泛型命令路由注册/分发 |
+| `util` | `config/util.zig` | hexEncode、currentTimestamp、readLine 工具 |
 
 ### 自定义二进制协议
 
 ```
-┌────────┬────────┬────────┬──────────────┬──────────────────┬──────────┐
-│ Header │  Type  │ Board  │  Payload Len │     Payload      │ Checksum │
-│ (2 B)  │ (1 B)  │ (1 B)  │    (4 B)     │    (Variable)    │  (2 B)   │
-└────────┴────────┴────────┴──────────────┴──────────────────┴──────────┘
+┌────────┬────────┬──────────────┬──────────────────┬──────────┐
+│ Header │  Type  │ Payload Len  │     Payload      │ Checksum │
+│ (2 B)  │ (1 B)  │   (4 B LE)   │    (Variable)    │  (2 B)   │
+└────────┴────────┴──────────────┴──────────────────┴──────────┘
 ```
 
-- **Header**: `0xEB90` (Magic Number)
-- **Type**: 包类型（如 `0x01` 表示连接关闭）
-- **Board**: 板卡 ID
+- **Header**: `0x55 0xAA` (Magic Number)
+- **Type**: 包类型（如 `0x1B` 表示数据帧）
 - **Payload Len**: Little-endian u32
-- **Checksum**: 累加和
+- **Checksum**: 所有前面字节的 wrapping 累加和（u16）
+
+> **注意**：早期设计文档中的 `Board` 单字节字段在解析端并未实现，board 信息应并入 Payload。
 
 ### 线程安全设计
 
@@ -110,23 +114,37 @@ zig build test
 
 ## 基准测试
 
-benchmark 模拟 2 个硬件 + 4 个 PC 的场景，测试三种场景：
+benchmark 模拟 2 个硬件 + 4 个 PC 的场景，测试三种场景（`releaseFast` 模式）：
 
 | 场景 | 描述 | 典型性能 |
 |------|------|---------|
-| A: 单组广播 | 1 HW → 2 PC, N=100/500/1000 | ~23K broadcasts/s |
-| B: 两组并发 | 2×500 包同时广播 | ~59K deliveries/s |
-| C: 流水线突发 | 2000 包持续负载 | ~21K broadcasts/s |
+| A: 单组广播 | 1 HW → 2 PC, N=1000 | ~10.9K broadcasts/s (~21.9K deliveries/s) |
+| B: 两组并发 | 2×500 包同时广播 | ~25.2K deliveries/s |
+| C: 流水线突发 | 2000 包持续负载 | ~10.5K broadcasts/s (~21.0K deliveries/s) |
+
+### 详细数据（N=1000 广播）
+
+```
+═══ Test A: Broadcast throughput (N=1000) ═══
+  10946.9 broadcasts/s  |  21893.8 deliveries/s
+
+═══ Test B: Two-group broadcast (2×500) ═══
+  25213.7 deliveries/s
+
+═══ Test C: Pipeline burst (N=2000) ═══
+  10503.0 broadcasts/s  |  21006.0 deliveries/s
+```
 
 ## 开发
 
 ### 构建
 
 ```bash
-zig build        # 编译
-zig build run    # 运行（PC:9000, HW:9001）
-zig build test   # 测试
-zig build bench  # 基准测试（需先运行服务）
+zig build              # 编译（Debug）
+zig build -Doptimize=ReleaseFast  # 编译（ReleaseFast，建议用于基准测试）
+zig build run          # 运行（PC:9000, HW:9001）
+zig build test         # 测试
+zig build bench        # 基准测试（需先运行服务）
 ```
 
 ### 依赖
@@ -141,23 +159,25 @@ src/
 ├── main.zig                    # 入口，DebugAllocator + 泄漏检测
 ├── config/                     # 核心配置与状态
 │   ├── root.zig                # 模块导出
+│   ├── config.zig              # 编译期配置常量（端口、命令路由表）
 │   ├── state.zig               # GlobalState, Group, 分组管理
 │   ├── custom_codec.zig        # 二进制协议编解码
-│   ├── util.zig                # hexEncode, readLine 工具
-│   └── api_model.zig           # JSON API 模型
+│   ├── handler_registry.zig    # 泛型命令路由注册/分发
+│   └── util.zig                # hexEncode, readLine 工具
 ├── model/                      # 业务模型
 │   ├── root.zig                # 模块导出
 │   ├── pc/                     # PC 控制端
 │   │   ├── root.zig            # 模块导出
-│   │   ├── pc_server.zig       # PC 连接处理
-│   │   └── common_request.zig  # 命令解析
-│   └── hardware/               # 硬件端
+│   │   └── pc_server.zig       # PC 连接处理
+│   └── hw/                     # 硬件端
 │       ├── root.zig            # 模块导出
-│       ├── hardware_server.zig # 硬件连接处理
-│       ├── common_response.zig # 响应解析
-│       └── hardware_close_response.zig
+│       └── hw_server.zig       # 硬件连接处理
+├── parser/                     # 协议解析器
+│   ├── root.zig                # 模块导出
+│   ├── byte_parser.zig         # 二进制协议流式解析
+│   └── json_parser.zig         # JSON 行协议解析
 └── test/                       # 测试与基准
     ├── benchmark_main.zig      # 性能基准测试
-    ├── integration_test.zig    # 集成测试
-    └── integration_test_main.zig
+    ├── integration_test.zig    # 集成测试（单测）
+    └── integration_test_main.zig  # 集成测试（可执行，需先运行服务）
 ```

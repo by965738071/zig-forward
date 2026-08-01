@@ -82,3 +82,36 @@ pub fn JsonLineParser(comptime IdType: type) type {
         }
     };
 }
+
+const testing = std.testing;
+
+test "json_parser parseCmd string" {
+    const Parser = JsonLineParser([]const u8);
+    var parser = Parser.init(testing.allocator);
+    defer parser.deinit();
+
+    const val = std.json.Value{ .string = "hello" };
+    const cmd = try parser.parseCmd(val, testing.allocator);
+    defer testing.allocator.free(cmd);
+
+    try testing.expectEqualStrings("hello", cmd);
+}
+
+test "json_parser parseCmd string empty" {
+    const Parser = JsonLineParser([]const u8);
+    var parser = Parser.init(testing.allocator);
+    defer parser.deinit();
+
+    const val = std.json.Value{ .string = "" };
+    try testing.expectError(error.InvalidCmd, parser.parseCmd(val, testing.allocator));
+}
+
+test "json_parser parseCmd integer" {
+    const Parser = JsonLineParser(u8);
+    var parser = Parser.init(testing.allocator);
+    defer parser.deinit();
+
+    const val = std.json.Value{ .integer = 42 };
+    const cmd = try parser.parseCmd(val, testing.allocator);
+    try testing.expectEqual(@as(u8, 42), cmd);
+}

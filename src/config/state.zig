@@ -14,6 +14,9 @@ pub const PcClientState = struct {
     allocator: std.mem.Allocator,
     write_mutex: Io.Mutex = .init,
     pc_id: []const u8,
+    /// Set to true when the stream has been closed by removeGroup.
+    /// Used to prevent double-close with handlePcClientInner's defer block.
+    stream_closed: bool = false,
 };
 
 /// A group associates one HW device (C-side) with zero or more PC
@@ -152,7 +155,7 @@ pub const GlobalState = struct {
         };
         defer self.allocator.free(clients);
 
-        // 2. 无锁逐个写入
+        // 2. 无锁逐个写入（末尾加换行，支持 line-based 读取）
         var write_buf: [4096]u8 = undefined;
         for (clients) |client| {
             var writer = client.stream.writer(io, &write_buf);
@@ -160,6 +163,7 @@ pub const GlobalState = struct {
                 std.log.warn("broadcastToA: write to {s} failed: {s}", .{ client.pc_id, @errorName(err) });
                 continue;
             };
+            writer.interface.writeByte('\n') catch continue;
             writer.interface.flush() catch continue;
         }
     }
@@ -189,7 +193,10 @@ pub const GlobalState = struct {
 
     /// Release control of a HW group (Layer 1).
     pub fn releaseControl(self: *GlobalState, io: Io, target_addr: []const u8) void {
-        self.mutex.lock(io) catch return;
+        self.mutex.lock(io) catch |err| {
+            std.log.warn("releaseControl: lock failed ({s}), target {s}", .{ @errorName(err), target_addr });
+            return;
+        };
         defer self.mutex.unlock(io);
 
         const group = self.groups.get(target_addr) orelse return;
@@ -254,14 +261,43 @@ pub const GlobalState = struct {
     }
 
     /// Remove an entire HW group (when the HW device disconnects).
+    /// Closes all PC client streams in the group so they don't remain
+    /// blocked on reads. The streams are closed *after* releasing the
+    /// lock to avoid a deadlock with a PC client's deferred cleanup
+    /// (which also acquires this lock).
     pub fn removeGroup(self: *GlobalState, io: Io, addr: []const u8) void {
-        self.mutex.lock(io) catch return;
-        defer self.mutex.unlock(io);
+        self.mutex.lock(io) catch |err| {
+            std.log.warn("removeGroup: lock failed ({s}), group {s} may leak", .{ @errorName(err), addr });
+            return;
+        };
+
+        // Collect PC client state pointers before freeing the group,
+        // so we can close their streams outside the lock.
+        var clients_to_close: [64]*PcClientState = undefined;
+        var clients_to_close_count: usize = 0;
 
         if (self.groups.fetchRemove(addr)) |kv| {
+            var it = kv.value.a_clients.iterator();
+            while (it.next()) |entry| {
+                if (clients_to_close_count < clients_to_close.len) {
+                    clients_to_close[clients_to_close_count] = entry.value_ptr.*;
+                    clients_to_close_count += 1;
+                }
+            }
             self.allocator.free(kv.key);
             kv.value.deinit(self.allocator);
             self.allocator.destroy(kv.value);
+        }
+
+        self.mutex.unlock(io);
+
+        // Close PC client streams (outside the lock) to unblock their
+        // read loops, causing them to clean up naturally.
+        // Set stream_closed = true first so the deferred cleanup in
+        // handlePcClientInner won't double-close the stream.
+        for (clients_to_close[0..clients_to_close_count]) |client| {
+            client.stream_closed = true;
+            client.stream.close(io);
         }
     }
 };

@@ -70,7 +70,7 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
 
         fn handleHw(hw_server: *Self, stream: net.Stream) void {
             handleHwInner(hw_server, stream) catch |err| {
-                std.log.err("HW device disconnected ({})", .{err});
+                std.log.warn("HW device disconnected ({})", .{err});
             };
         }
 

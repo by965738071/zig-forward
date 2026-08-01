@@ -2,9 +2,10 @@ const std = @import("std");
 const Io = std.Io;
 const net = Io.net;
 
-const app = @import("app");
-const GlobalState = app.config.state.GlobalState;
-const PcServer = app.model.pc.pc_server.PcServer;
+const ConfigType = @import("config").ConfigType;
+const GlobalState = @import("config").state.GlobalState;
+const PcServer = @import("pc_server").pc_server.PcServer;
+const ByteParser = @import("parser").byte_parser.ByteParser;
 
 // ── Minimal integration test: PC server only ──
 // Verifies the server accepts a connection and handles a Register
@@ -23,16 +24,17 @@ test "pc register fails when hw not connected" {
     defer state.deinit();
 
     const port: u16 = 19402;
+    const cfg: ConfigType = .{ .pc = .{ .host = "0.0.0.0", .port = port } };
 
     // 启动 PC 服务器
     const thread = try std.Thread.spawn(.{}, struct {
-        fn run(alloc2: std.mem.Allocator, st: *GlobalState, i: Io, p: u16) void {
-            var server = PcServer.init(alloc2, st, i, "0.0.0.0", p);
+        fn run(alloc2: std.mem.Allocator, st: *GlobalState, i: Io, c: ConfigType) void {
+            var server = PcServer(u8, ByteParser()).init(alloc2, st, i, c);
             server.start() catch |err| {
                 std.log.err("PC server: {}", .{err});
             };
         }
-    }.run, .{ alloc, &state, io, port });
+    }.run, .{ alloc, &state, io, cfg });
 
     // 等待服务器启动
     Io.sleep(io, .{ .nanoseconds = 500_000_000 }, .real) catch {};

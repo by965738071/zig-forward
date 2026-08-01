@@ -61,7 +61,7 @@ pub fn PcServer(comptime IdType: type, comptime Parser: type) type {
 
         fn handlePcClient(self: *Self, stream: std.Io.net.Stream) void {
             handlePcClientInner(self, stream) catch |err| {
-                std.log.err("PC client disconnected ({})", .{err});
+                std.log.warn("PC client disconnected ({})", .{err});
             };
         }
 
@@ -91,7 +91,9 @@ pub fn PcServer(comptime IdType: type, comptime Parser: type) type {
                     allocator.free(addr.*);
                 }
                 target_addrs.deinit();
-                stream.close(io);
+                if (!client_state.stream_closed) {
+                    stream.close(io);
+                }
                 allocator.destroy(client_state);
             }
 
@@ -130,6 +132,7 @@ pub fn PcServer(comptime IdType: type, comptime Parser: type) type {
                 if (response) |data| {
                     defer allocator.free(data);
                     try writer.writeAll(data);
+                    try writer.writeByte('\n');
                     try writer.flush();
                 }
             }
