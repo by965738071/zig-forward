@@ -51,7 +51,7 @@ pub fn PcServer(comptime IdType: type, comptime Parser: type) type {
                 const stream = try server.accept(self.io);
                 std.log.info("PC client connected ip ={f}", .{stream.socket.address});
 
-                 _ = std.Io.concurrent(self.io, struct {
+                _ = std.Io.concurrent(self.io, struct {
                     fn run(s: *Self, st: std.Io.net.Stream) void {
                         s.handlePcClientInner(st) catch |err| {
                             std.log.warn("PC client disconnected ({})", .{err});
