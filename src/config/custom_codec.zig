@@ -64,4 +64,3 @@ test "custom_codec encode round-trip checksum" {
     try testing.expectEqual(@as(u32, 3), std.mem.readInt(u32, frame[3..][0..4], .little));
     try testing.expect(verifyChecksum(frame));
 }
-
