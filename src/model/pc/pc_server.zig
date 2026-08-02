@@ -1,10 +1,10 @@
 const std = @import("std");
 
-const GlobalState = @import("config").state.GlobalState;
-const PcClientState = @import("config").state.PcClientState;
+const GlobalState = @import("app_config").state.GlobalState;
+const PcClientState = @import("app_config").state.PcClientState;
 
-const HandlerRegistry = @import("config").handler_registry.HandlerRegistry;
-const Config = @import("config").ConfigType;
+const HandlerRegistry = @import("app_config").handler_registry.HandlerRegistry;
+const Config = @import("app_config").ConfigType;
 
 pub fn PcServer(comptime IdType: type, comptime Parser: type) type {
     return struct {

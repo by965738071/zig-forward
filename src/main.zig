@@ -1,7 +1,7 @@
 const std = @import("std");
 const Io = std.Io;
 
-const cfg = @import("config");
+const cfg = @import("app_config");
 // 暴露 config 模块（config/root.zig）给集成测试：测试通过 `@import("app").config.*` 访问它。
 pub const config = cfg;
 
@@ -11,6 +11,9 @@ const HwServer = @import("hw_server").hw_server.HwServer;
 const ByteParser = @import("parser").byte_parser.ByteParser;
 const JsonLineParser = @import("parser").json_parser.JsonLineParser;
 const util = @import("util");
+
+const http_framework = @import("http_framework");
+const http_srv = @import("http");
 
 pub fn main(init: std.process.Init) !void {
     var debug_allocator = std.heap.DebugAllocator(.{}){};
@@ -59,7 +62,11 @@ pub fn main(init: std.process.Init) !void {
         hw_server.setDefault(h);
     }
 
-    // 并发运行两个 server，async 返回 Future，await 阻塞直到完成
+    // ── HTTP server ──
+    var http_router = try http_srv.server.setupRoutes(allocator, &state);
+    errdefer http_router.deinit();
+
+    // 并发运行三个 server，async 返回 Future，await 阻塞直到完成
     var pc_future = Io.async(io, struct {
         fn run(pc: *PcServer(u8, ByteParser())) void {
             pc.start() catch |err| std.log.err("PC server exited: {}", .{err});
@@ -70,8 +77,14 @@ pub fn main(init: std.process.Init) !void {
             hw.start() catch |err| std.log.err("HW server exited: {}", .{err});
         }
     }.run, .{&hw_server});
+    var http_future = Io.async(io, struct {
+        fn run(alloc: std.mem.Allocator, http_io: std.Io, router: http_framework.Router) void {
+            http_srv.server.start(alloc, http_io, "127.0.0.1", 9002, router);
+        }
+    }.run, .{ allocator, io, http_router });
 
-    // 阻塞等待（两个 server 都是死循环，相当于永远等待）
+    // 阻塞等待（三个 server 都是死循环，相当于永远等待）
     pc_future.await(io);
     hw_future.await(io);
+    http_future.await(io);
 }

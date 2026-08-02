@@ -1,5 +1,5 @@
 const std = @import("std");
-const cfg = @import("config");
+const cfg = @import("app_config");
 const ConfigType = cfg.ConfigType;
 
 /// Parse CLI arguments and return a runtime config.

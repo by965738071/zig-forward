@@ -2,9 +2,9 @@ const std = @import("std");
 const Io = std.Io;
 const net = Io.net;
 
-const GlobalState = @import("config").state.GlobalState;
-const PcClientState = @import("config").state.PcClientState;
-const HandlerRegistry = @import("config").handler_registry.HandlerRegistry;
+const GlobalState = @import("app_config").state.GlobalState;
+const PcClientState = @import("app_config").state.PcClientState;
+const HandlerRegistry = @import("app_config").handler_registry.HandlerRegistry;
 
 /// 泛型硬件服务器，与 PcServer 对称。
 ///

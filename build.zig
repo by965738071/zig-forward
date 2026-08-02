@@ -4,44 +4,57 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const config_mod = b.createModule(.{
+    //http framework dependency ;
+    const http_framework_mod = b.dependency("http_framework", .{});
+
+    const app_config_mod = b.addModule("app_config", .{
         .root_source_file = b.path("src/config/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const pc_server_mod = b.createModule(.{
+    const pc_server_mod = b.addModule("pc_server", .{
         .root_source_file = b.path("src/model/pc/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "config", .module = config_mod },
+            .{ .name = "app_config", .module = app_config_mod },
         },
     });
 
-    const hw_server = b.createModule(.{
+    const hw_server = b.addModule("hw_server", .{
         .root_source_file = b.path("src/model/hw/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "config", .module = config_mod },
+            .{ .name = "app_config", .module = app_config_mod },
         },
     });
 
-    const parser_mod = b.createModule(.{
+    const parser_mod = b.addModule("parser", .{
         .root_source_file = b.path("src/parser/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "config", .module = config_mod },
+            .{ .name = "app_config", .module = app_config_mod },
         },
     });
 
-    const util_mod = b.createModule(.{
+    const util_mod = b.addModule("util", .{
         .root_source_file = b.path("src/util.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "config", .module = config_mod },
+            .{ .name = "app_config", .module = app_config_mod },
+        },
+    });
+
+    const http_mod = b.addModule("http", .{
+        .root_source_file = b.path("src/http/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "http_framework", .module = http_framework_mod.module("http_framework") },
+            .{ .name = "app_config", .module = app_config_mod },
         },
     });
 
@@ -52,11 +65,13 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "config", .module = config_mod },
+                .{ .name = "app_config", .module = app_config_mod },
                 .{ .name = "pc_server", .module = pc_server_mod },
                 .{ .name = "hw_server", .module = hw_server },
                 .{ .name = "parser", .module = parser_mod },
                 .{ .name = "util", .module = util_mod },
+                .{ .name = "http", .module = http_mod },
+                .{ .name = "http_framework", .module = http_framework_mod.module("http_framework") },
             },
         }),
     });
@@ -80,11 +95,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "config", .module = config_mod },
+            .{ .name = "app_config", .module = app_config_mod },
             .{ .name = "pc_server", .module = pc_server_mod },
             .{ .name = "hw_server", .module = hw_server },
             .{ .name = "parser", .module = parser_mod },
             .{ .name = "util", .module = util_mod },
+            .{ .name = "http", .module = http_mod },
+            .{ .name = "http_framework", .module = http_framework_mod.module("http_framework") },
         },
     });
 
@@ -100,7 +117,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
         .imports = &.{
             .{ .name = "app", .module = app_mod },
-            .{ .name = "config", .module = config_mod },
+            .{ .name = "app_config", .module = app_config_mod },
             .{ .name = "pc_server", .module = pc_server_mod },
             .{ .name = "hw_server", .module = hw_server },
             .{ .name = "parser", .module = parser_mod },
@@ -123,7 +140,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     bench_mod.addImport("app", app_mod);
-    bench_mod.addImport("config", config_mod);
+    bench_mod.addImport("app_config", app_config_mod);
     bench_mod.addImport("pc_server", pc_server_mod);
     bench_mod.addImport("hw_server", hw_server);
     bench_mod.addImport("parser", parser_mod);

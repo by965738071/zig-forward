@@ -2,8 +2,8 @@ const std = @import("std");
 const Io = std.Io;
 const net = Io.net;
 
-const ConfigType = @import("config").ConfigType;
-const GlobalState = @import("config").state.GlobalState;
+const ConfigType = @import("app_config").ConfigType;
+const GlobalState = @import("app_config").state.GlobalState;
 const PcServer = @import("pc_server").pc_server.PcServer;
 const ByteParser = @import("parser").byte_parser.ByteParser;
 

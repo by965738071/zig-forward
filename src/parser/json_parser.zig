@@ -1,5 +1,5 @@
 const std = @import("std");
-const readLine = @import("config").util.readLine;
+const readLine = @import("app_config").util.readLine;
 
 pub fn JsonLineParser(comptime IdType: type) type {
     return struct {

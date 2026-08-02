@@ -3,7 +3,7 @@ const Io = std.Io;
 const net = Io.net;
 const c = std.c;
 
-const custom_codec = @import("config").custom_codec;
+const custom_codec = @import("app_config").custom_codec;
 
 /// Integration test — connects to an ALREADY RUNNING server.
 /// Fails fast (within 5s) if the server isn't running.
