@@ -63,6 +63,12 @@ hw: struct {
     port: u16,
 } = .{ .host = "0.0.0.0", .port = 9001 },
 
+/// WebSocket 服务器设置
+ws: struct {
+    host: []const u8,
+    port: u16,
+} = .{ .host = "0.0.0.0", .port = 9224 },
+
 /// PC 命令路由表（在这里添加/删除命令映射）
 commands: []const CommandEntry = &.{
     .{ .id = 0x01, .handler = handleBoxStatus },

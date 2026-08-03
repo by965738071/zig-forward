@@ -4,8 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    //http framework dependency ;
-    const http_framework_mod = b.dependency("http_framework", .{});
+    const websocket = b.dependency("websocket", .{});
 
     const app_config_mod = b.addModule("app_config", .{
         .root_source_file = b.path("src/config/root.zig"),
@@ -13,7 +12,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const pc_server_mod = b.addModule("pc_server", .{
-        .root_source_file = b.path("src/model/pc/root.zig"),
+        .root_source_file = b.path("src/pc/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -22,7 +21,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const hw_server = b.addModule("hw_server", .{
-        .root_source_file = b.path("src/model/hw/root.zig"),
+        .root_source_file = b.path("src/hw/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -48,13 +47,13 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    const http_mod = b.addModule("http", .{
-        .root_source_file = b.path("src/http/root.zig"),
+    const ws_server_mod = b.addModule("ws_server", .{
+        .root_source_file = b.path("src/ws/ws_server.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "http_framework", .module = http_framework_mod.module("http_framework") },
             .{ .name = "app_config", .module = app_config_mod },
+            .{ .name = "websocket", .module = websocket.module("websocket") },
         },
     });
 
@@ -70,8 +69,8 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "hw_server", .module = hw_server },
                 .{ .name = "parser", .module = parser_mod },
                 .{ .name = "util", .module = util_mod },
-                .{ .name = "http", .module = http_mod },
-                .{ .name = "http_framework", .module = http_framework_mod.module("http_framework") },
+                .{ .name = "ws_server", .module = ws_server_mod },
+                .{ .name = "websocket", .module = websocket.module("websocket") },
             },
         }),
     });
@@ -100,8 +99,8 @@ pub fn build(b: *std.Build) void {
             .{ .name = "hw_server", .module = hw_server },
             .{ .name = "parser", .module = parser_mod },
             .{ .name = "util", .module = util_mod },
-            .{ .name = "http", .module = http_mod },
-            .{ .name = "http_framework", .module = http_framework_mod.module("http_framework") },
+            .{ .name = "ws_server", .module = ws_server_mod },
+            .{ .name = "websocket", .module = websocket.module("websocket") },
         },
     });
 

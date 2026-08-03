@@ -15,6 +15,10 @@ pub fn PcServer(comptime IdType: type, comptime Parser: type) type {
         io: std.Io,
         config: Config,
         registry: HandlerRegistry(IdType),
+        /// 监听 socket，start() 时创建，stop() 时关闭
+        listener: ?std.Io.net.Server = null,
+        /// 标记已请求停止，防止 stop() 先于 start() 执行时遗漏
+        _stopped: bool = false,
 
         const Self = @This();
 
@@ -30,6 +34,19 @@ pub fn PcServer(comptime IdType: type, comptime Parser: type) type {
 
         pub fn deinit(self: *Self) void {
             self.registry.deinit();
+            if (self.listener) |*s| {
+                s.deinit(self.io);
+                self.listener = null;
+            }
+        }
+
+        /// 关闭监听 socket，正在 accept() 的调用会返回错误，导致 start() 退出
+        pub fn stop(self: *Self) void {
+            self._stopped = true;
+            if (self.listener) |*s| {
+                s.deinit(self.io);
+                self.listener = null;
+            }
         }
 
         pub fn registerCommand(self: *Self, cmd: IdType, handler: Handler) !void {
@@ -42,13 +59,23 @@ pub fn PcServer(comptime IdType: type, comptime Parser: type) type {
 
         pub fn start(self: *Self) !void {
             const addr = try std.Io.net.IpAddress.parseIp4(self.config.pc.host, self.config.pc.port);
-            var server = try addr.listen(self.io, .{});
-            defer server.deinit(self.io);
+            self.listener = try addr.listen(self.io, .{});
+            errdefer self.stop();
+
+            // 如果在创建 listener 之前 stop() 已被调用，立即关闭
+            if (self._stopped) {
+                self.stop();
+                return;
+            }
 
             std.log.info("PC server listening on {s}:{d}", .{ self.config.pc.host, self.config.pc.port });
 
-            while (true) {
-                const stream = try server.accept(self.io);
+            while (!self._stopped) {
+                const stream = self.listener.?.accept(self.io) catch |err| {
+                    if (self._stopped) break; // 被 stop() 关闭，正常退出
+                    std.log.err("PC server accept failed: {}", .{err});
+                    return err;
+                };
                 std.log.info("PC client connected ip ={f}", .{stream.socket.address});
 
                 _ = std.Io.concurrent(self.io, struct {
@@ -81,6 +108,7 @@ pub fn PcServer(comptime IdType: type, comptime Parser: type) type {
                 .write_mutex = .init,
                 .pc_id = pc_id,
             };
+            client_state.initClient();
 
             var target_addrs: std.StringHashMap(void) = .init(allocator);
 
@@ -116,7 +144,8 @@ pub fn PcServer(comptime IdType: type, comptime Parser: type) type {
                     const gop = try target_addrs.getOrPut(addr);
                     if (!gop.found_existing) {
                         gop.key_ptr.* = try allocator.dupe(u8, addr);
-                        try state.addAClient(io, addr, pc_id, client_state);
+                        // 通过 AClient 接口注册到 Group.a_clients
+                        try state.addAClient(io, addr, pc_id, &client_state.client);
                     }
 
                     state.sendToC(io, addr, frame.data) catch |err| {

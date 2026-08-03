@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 
 const cfg = @import("app_config");
@@ -11,80 +12,133 @@ const HwServer = @import("hw_server").hw_server.HwServer;
 const ByteParser = @import("parser").byte_parser.ByteParser;
 const JsonLineParser = @import("parser").json_parser.JsonLineParser;
 const util = @import("util");
+const ws_server = @import("ws_server");
 
-const http_framework = @import("http_framework");
-const http_srv = @import("http");
+// ── 全局关闭标志（信号处理器中设置，主循环中检查）──
+var g_shutdown = std.atomic.Value(bool).init(false);
+
+fn setupShutdownHandler() !void {
+    if (builtin.os.tag == .windows) {
+        // Windows 用 SetConsoleCtrlHandler 捕获 Ctrl+C
+        // x86_64 上 Win32 API 的调用约定就是 .C
+        const HandlerRoutine = *const fn (dwCtrlType: std.os.windows.DWORD) callconv(.c) std.os.windows.BOOL;
+
+        const handler: HandlerRoutine = struct {
+            fn ctrlHandler(dwCtrlType: std.os.windows.DWORD) callconv(.c) std.os.windows.BOOL {
+                if (dwCtrlType == 0) { // CTRL_C_EVENT
+                    g_shutdown.store(true, .monotonic);
+                    return @as(std.os.windows.BOOL, .true);
+                }
+                return @as(std.os.windows.BOOL, .false);
+            }
+        }.ctrlHandler;
+
+        const kernel32 = std.os.windows.kernel32;
+        _ = kernel32.SetConsoleCtrlHandler(handler, 1);
+    } else {
+        // POSIX 用 sigaction 捕获 SIGINT/SIGTERM
+        const Handler = struct {
+            fn handler(sig: c_int) callconv(.c) void {
+                _ = sig;
+                g_shutdown.store(true, .monotonic);
+            }
+        };
+        var sa = std.os.Sigaction{
+            .handler = .{ .handler = Handler.handler },
+            .mask = std.os.empty_sigset,
+            .flags = 0,
+        };
+        try std.os.sigaction(std.os.SIGINT, &sa, null);
+        try std.os.sigaction(std.os.SIGTERM, &sa, null);
+    }
+}
 
 pub fn main(init: std.process.Init) !void {
     var debug_allocator = std.heap.DebugAllocator(.{}){};
     const allocator = debug_allocator.allocator();
 
-    defer {
-        const check = debug_allocator.deinit();
-        if (check == .leak) {
-            std.log.err("Debug allocator deinit error", .{});
-        }
-    }
+    // ── 设置信号处理（Ctrl+C）──
+    try setupShutdownHandler();
 
     // ── Parse CLI arguments ──
-    const runtime_config = util.parseCliArgs(allocator, init.minimal.args) catch |err| {
-        if (err == error.HelpRequested) return;
-        return err;
-    };
+    var runtime_config = try util.parseCliArgs(allocator, init.minimal.args);
+    defer runtime_config.deinit(allocator);
 
     // ── Global state ──
     var state = GlobalState.init(allocator);
     defer state.deinit();
 
-    // ── Single Io backend for the entire application ──
-    var backend = Io.Threaded.init(allocator, .{});
-    const io = backend.io();
+    const rc = &runtime_config.config;
 
-    std.log.info("Zig Forward starting — PC:{s}:{d}  HW:{s}:{d}", .{ runtime_config.pc.host, runtime_config.pc.port, runtime_config.hw.host, runtime_config.hw.port });
+    std.log.info("Zig Forward starting — PC:{s}:{d}  HW:{s}:{d}  WS:{s}:{d}", .{ rc.pc.host, rc.pc.port, rc.hw.host, rc.hw.port, rc.ws.host, rc.ws.port });
 
     // ── PC server ──
     var pc_server = PcServer(u8, ByteParser())
-        .init(allocator, &state, io, runtime_config);
+        .init(allocator, &state, init.io, rc.*);
     defer pc_server.deinit();
 
-    for (runtime_config.commands) |cmd| {
+    for (rc.commands) |cmd| {
         try pc_server.registerCommand(cmd.id, cmd.handler);
     }
 
     // ── HW server ──
-    var hw_server = HwServer([]const u8, JsonLineParser([]const u8)).init(allocator, &state, io, runtime_config.hw.host, runtime_config.hw.port);
+    var hw_server = HwServer([]const u8, JsonLineParser([]const u8))
+        .init(allocator, &state, init.io, rc.hw.host, rc.hw.port);
     defer hw_server.deinit();
 
-    for (runtime_config.hw_commands) |cmd| {
+    for (rc.hw_commands) |cmd| {
         try hw_server.registerCommand(cmd.name, cmd.handler);
     }
-    if (runtime_config.hw_default_handler) |h| {
+    if (rc.hw_default_handler) |h| {
         hw_server.setDefault(h);
     }
 
-    // ── HTTP server ──
-    var http_router = try http_srv.server.setupRoutes(allocator, &state);
-    errdefer http_router.deinit();
+    // ── WebSocket 共享状态 ──
+    var ws_app = ws_server.App.init(allocator, init.io, &state);
+    defer ws_app.deinit();
 
-    // 并发运行三个 server，async 返回 Future，await 阻塞直到完成
-    var pc_future = Io.async(io, struct {
+    // ── 在三个 Io.async 协程中启动服务器 ──
+    var pc_future = Io.async(init.io, struct {
         fn run(pc: *PcServer(u8, ByteParser())) void {
             pc.start() catch |err| std.log.err("PC server exited: {}", .{err});
         }
     }.run, .{&pc_server});
-    var hw_future = Io.async(io, struct {
+
+    var hw_future = Io.async(init.io, struct {
         fn run(hw: *HwServer([]const u8, JsonLineParser([]const u8))) void {
             hw.start() catch |err| std.log.err("HW server exited: {}", .{err});
         }
     }.run, .{&hw_server});
-    var http_future = Io.async(io, struct {
-        fn run(alloc: std.mem.Allocator, http_io: std.Io, router: http_framework.Router) void {
-            http_srv.server.start(alloc, http_io, "127.0.0.1", 9002, router);
-        }
-    }.run, .{ allocator, io, http_router });
 
-    // 阻塞等待（三个 server 都是死循环，相当于永远等待）
-    pc_future.await(io);
-    hw_future.await(io);
-    http_future.await(io);
+    var ws_future = Io.async(init.io, struct {
+        fn run(app: *ws_server.App, host: []const u8, port: u16) void {
+            ws_server.startWithApp(app, host, port) catch |err| std.log.err("WS server exited: {}", .{err});
+        }
+    }.run, .{ &ws_app, rc.ws.host, rc.ws.port });
+
+    // ── 等待关闭信号 ──
+    std.log.info("Server started. Press Ctrl+C to stop.", .{});
+    while (!g_shutdown.load(.monotonic)) {
+        Io.sleep(init.io, .{ .milliseconds = 200 }, .real) catch {};
+    }
+
+    // ── 优雅关闭 ──
+    std.log.info("Shutting down...", .{});
+    pc_server.stop();
+    hw_server.stop();
+    ws_app.stop();
+
+    // 等待服务器协程退出（它们检测到 stop 后应很快返回）
+    pc_future.await(init.io);
+    hw_future.await(init.io);
+    ws_future.await(init.io);
+
+    std.log.info("Server stopped, cleaning up...", .{});
+    // defer 链依次执行：
+    //   ws_app.deinit()     → 释放 WS server 资源
+    //   hw_server.deinit()  → 释放 HW server 资源
+    //   pc_server.deinit()  → 释放 PC server 资源
+    //   state.deinit()      → 释放 GlobalState
+    //   runtime_config.deinit(allocator) → 释放 CLI 分配的 host 字符串
+    //   debug_allocator.deinit() → 检查 leak（现在应该干净了）
 }

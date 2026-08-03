@@ -25,6 +25,10 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
         host: []const u8,
         port: u16,
         registry: HandlerRegistry(IdType),
+        /// 监听 socket，start() 时创建，stop() 时关闭
+        listener: ?net.Server = null,
+        /// 标记已请求停止，防止 stop() 先于 start() 执行时遗漏
+        _stopped: bool = false,
 
         pub fn init(allocator: std.mem.Allocator, state: *GlobalState, io: Io, host: []const u8, port: u16) Self {
             return .{
@@ -39,17 +43,40 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
 
         pub fn deinit(self: *Self) void {
             self.registry.deinit();
+            if (self.listener) |*s| {
+                s.deinit(self.io);
+                self.listener = null;
+            }
+        }
+
+        /// 关闭监听 socket，正在 accept() 的调用会返回错误，导致 start() 退出
+        pub fn stop(self: *Self) void {
+            self._stopped = true;
+            if (self.listener) |*s| {
+                s.deinit(self.io);
+                self.listener = null;
+            }
         }
 
         pub fn start(self: *Self) !void {
             const addr = try net.IpAddress.parseIp4(self.host, self.port);
-            var server = try addr.listen(self.io, .{});
-            defer server.deinit(self.io);
+            self.listener = try addr.listen(self.io, .{});
+            errdefer self.stop();
+
+            // 如果在创建 listener 之前 stop() 已被调用，立即关闭
+            if (self._stopped) {
+                self.stop();
+                return;
+            }
 
             std.log.info("HW server listening on {s}:{d}", .{ self.host, self.port });
 
-            while (true) {
-                const stream = try server.accept(self.io);
+            while (!self._stopped) {
+                const stream = self.listener.?.accept(self.io) catch |err| {
+                    if (self._stopped) break; // 被 stop() 关闭，正常退出
+                    std.log.err("HW server accept failed: {}", .{err});
+                    return err;
+                };
                 std.log.info("HW device connected", .{});
 
                 _ = Io.concurrent(self.io, struct {
@@ -94,6 +121,7 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
                 .write_mutex = .init,
                 .pc_id = hw_id,
             };
+            hw_state.initClient();
 
             try state.setCSender(io, hw_id, hw_state);
             std.log.info("HW {s} connected and registered", .{hw_id});
@@ -123,6 +151,7 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
                 );
                 if (result) |json| {
                     defer allocator.free(json);
+                    // broadcastToA 现在会通过 AClient 接口同时发送给 TCP 和 WS 客户端
                     try state.broadcastToA(io, hw_id, json);
                 }
             }

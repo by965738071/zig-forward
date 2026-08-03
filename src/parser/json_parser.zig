@@ -26,6 +26,7 @@ pub fn JsonLineParser(comptime IdType: type) type {
         pub fn parse(_: *@This(), reader: *std.Io.Reader, allocator: std.mem.Allocator) !?Frame {
             const raw = readLine(reader, allocator) catch |err| {
                 if (err == error.EndOfStream) return null;
+                std.debug.print("错误：{s}", .{@errorName(err)});
                 return err;
             };
             errdefer allocator.free(raw);
