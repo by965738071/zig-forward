@@ -27,7 +27,7 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
         registry: HandlerRegistry(IdType),
         /// 监听 socket，start() 时创建，stop() 时关闭
         listener: ?net.Server = null,
-        /// 标记已请求停止，防止 stop() 先于 start() 执行时遗漏
+        /// 标记已请求停止
         _stopped: bool = false,
 
         pub fn init(allocator: std.mem.Allocator, state: *GlobalState, io: Io, host: []const u8, port: u16) Self {
@@ -49,13 +49,23 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
             }
         }
 
-        /// 关闭监听 socket，正在 accept() 的调用会返回错误，导致 start() 退出
+        /// 停止服务器。
+        /// 设置停止标志，然后自连接解除 accept() 阻塞。
+        /// 不直接关闭 listener（Windows 上 pending accept 的 .CANCELLED 会导致 panic），
+        /// listener 由 deinit() 在 accept 循环退出后安全关闭。
         pub fn stop(self: *Self) void {
             self._stopped = true;
-            if (self.listener) |*s| {
-                s.deinit(self.io);
-                self.listener = null;
+            if (self.listener != null) {
+                // 自连接：连接到 listener 地址，使阻塞的 accept() 返回
+                self.connectToSelf() catch {};
             }
+        }
+
+        /// 自连接到 listener 以解除 accept() 阻塞
+        fn connectToSelf(self: *Self) !void {
+            const addr = try net.IpAddress.parseIp4("127.0.0.1", self.port);
+            const stream = try addr.connect(self.io, .{ .mode = .stream });
+            stream.close(self.io);
         }
 
         pub fn start(self: *Self) !void {
@@ -71,12 +81,17 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
 
             std.log.info("HW server listening on {s}:{d}", .{ self.host, self.port });
 
-            while (!self._stopped) {
+            while (true) {
+                if (self._stopped) break;
                 const stream = self.listener.?.accept(self.io) catch |err| {
                     if (self._stopped) break; // 被 stop() 关闭，正常退出
                     std.log.err("HW server accept failed: {}", .{err});
                     return err;
                 };
+                if (self._stopped) {
+                    stream.close(self.io);
+                    break;
+                }
                 std.log.info("HW device connected", .{});
 
                 _ = Io.concurrent(self.io, struct {

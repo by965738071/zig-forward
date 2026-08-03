@@ -63,6 +63,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .link_libc = true,
             .imports = &.{
                 .{ .name = "app_config", .module = app_config_mod },
                 .{ .name = "pc_server", .module = pc_server_mod },

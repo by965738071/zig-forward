@@ -19,18 +19,20 @@ pub const App = struct {
         };
     }
 
-    /// 停止 WebSocket 服务器（关闭监听，等待 worker 退出）
+    /// 停止 WebSocket 服务器（仅发信号，不销毁资源）。
+    /// 销毁由 deinit() 在 await() 之后执行。
     pub fn stop(self: *App) void {
         if (self.ws_server) |s| {
             s.stop();
-            s.deinit();
-            self.allocator.destroy(s);
-            self.ws_server = null;
         }
     }
 
     pub fn deinit(self: *App) void {
-        self.stop();
+        if (self.ws_server) |s| {
+            s.deinit();
+            self.allocator.destroy(s);
+            self.ws_server = null;
+        }
     }
 };
 

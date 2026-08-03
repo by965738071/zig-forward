@@ -37,19 +37,26 @@ fn setupShutdownHandler() !void {
         _ = SetConsoleCtrlHandler(handler, 1);
     } else {
         // POSIX 用 sigaction 捕获 SIGINT/SIGTERM
+        const posix = std.posix;
+
         const Handler = struct {
             fn handler(sig: c_int) callconv(.c) void {
                 _ = sig;
                 g_shutdown.store(true, .monotonic);
             }
         };
-        var sa = std.os.Sigaction{
+
+        var mask: posix.sigset_t = undefined;
+        posix.sigemptyset(&mask);
+
+        var sa: posix.Sigaction = .{
             .handler = .{ .handler = Handler.handler },
-            .mask = std.os.empty_sigset,
+            .mask = mask,
             .flags = 0,
         };
-        try std.os.sigaction(std.os.SIGINT, &sa, null);
-        try std.os.sigaction(std.os.SIGTERM, &sa, null);
+
+        _ = posix.sigaction(posix.SIG.INT, &sa, null);
+        _ = posix.sigaction(posix.SIG.TERM, &sa, null);
     }
 }
 
