@@ -32,7 +32,31 @@ pub const AClient = struct {
 };
 
 // ════════════════════════════════════════════════════════════════════
-//  TCP 传输层实现
+//  CSender 接口：业务层向 HW 设备发送数据的抽象接口
+// ════════════════════════════════════════════════════════════════════
+
+/// CSender 是业务层（GlobalState/Group）向 HW 设备（C 端）发送数据的抽象接口。
+/// 与 AClient 对称，使 C 端传输协议也可替换（TCP、MQTT、QUIC 等）。
+pub const CSender = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        send: *const fn (ptr: *anyopaque, io: Io, data: []const u8) anyerror!void,
+        close: *const fn (ptr: *anyopaque, io: Io) void,
+    };
+
+    pub fn send(self: *CSender, io: Io, data: []const u8) !void {
+        return self.vtable.send(self.ptr, io, data);
+    }
+
+    pub fn close(self: *CSender, io: Io) void {
+        return self.vtable.close(self.ptr, io);
+    }
+};
+
+// ════════════════════════════════════════════════════════════════════
+//  TCP 传输层实现（同时实现 AClient 和 CSender）
 // ════════════════════════════════════════════════════════════════════
 
 /// Per-connection state shared via GlobalState.
@@ -48,10 +72,17 @@ pub const PcClientState = struct {
     stream_closed: bool = false,
     /// 嵌入的 AClient 接口（指针稳定，可传给 addAClient）
     client: AClient = undefined,
+    /// 嵌入的 CSender 接口（指针稳定，可传给 setCSender）
+    c_sender: CSender = undefined,
 
     /// 初始化嵌入的 AClient（传入 addAClient 时用 &self.client）
     pub fn initClient(self: *PcClientState) void {
         self.client = .{ .ptr = self, .vtable = &tcp_vtable };
+    }
+
+    /// 初始化嵌入的 CSender（传入 setCSender 时用 &self.c_sender）
+    pub fn initCSender(self: *PcClientState) void {
+        self.c_sender = .{ .ptr = self, .vtable = &tcp_c_sender_vtable };
     }
 
     /// 将此 TCP 客户端包装为 AClient 接口（临时值，不能取地址传）
@@ -76,9 +107,30 @@ pub const PcClientState = struct {
         self.stream.close(io);
     }
 
+    fn tcpCSenderSend(ptr: *anyopaque, io: Io, data: []const u8) !void {
+        const self: *PcClientState = @ptrCast(@alignCast(ptr));
+        try self.write_mutex.lock(io);
+        defer self.write_mutex.unlock(io);
+        var write_buf: [4096]u8 = undefined;
+        var writer = self.stream.writer(io, &write_buf);
+        try writer.interface.writeAll(data);
+        try writer.interface.flush();
+    }
+
+    fn tcpCSenderClose(ptr: *anyopaque, io: Io) void {
+        const self: *PcClientState = @ptrCast(@alignCast(ptr));
+        self.stream_closed = true;
+        self.stream.close(io);
+    }
+
     const tcp_vtable = AClient.VTable{
         .send = tcpSend,
         .close = tcpClose,
+    };
+
+    const tcp_c_sender_vtable = CSender.VTable{
+        .send = tcpCSenderSend,
+        .close = tcpCSenderClose,
     };
 };
 
@@ -92,13 +144,14 @@ pub const Group = struct {
     /// a_clients 存储 *AClient 接口指针，不关心底层传输协议。
     /// TCP 客户端传 &PcClientState.asClient()，WS 客户端传 &WsClientState.client。
     a_clients: std.StringHashMap(*AClient),
-    c_sender: *PcClientState,
+    /// c_sender 是向 HW 设备（C 端）发送数据的接口，不关心底层传输协议。
+    c_sender: *CSender,
 
     // Layer 1+2: Control rights with lease
     owner: ?[]const u8 = null,
     lease_expiry: i64 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, c_sender: *PcClientState) Group {
+    pub fn init(allocator: std.mem.Allocator, c_sender: *CSender) Group {
         return .{
             .a_clients = std.StringHashMap(*AClient).init(allocator),
             .c_sender = c_sender,
@@ -141,7 +194,7 @@ pub const GlobalState = struct {
     }
 
     /// Register (or replace) a HW device (C-side).
-    pub fn setCSender(self: *GlobalState, io: Io, addr: []const u8, sender: *PcClientState) !void {
+    pub fn setCSender(self: *GlobalState, io: Io, addr: []const u8, sender: *CSender) !void {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
 
@@ -310,21 +363,13 @@ pub const GlobalState = struct {
     }
 
     /// Forward a message from a PC client to the HW device.
+    /// 通过 CSender 接口发送，不关心底层传输协议（TCP/MQTT/QUIC 等）。
     pub fn sendToC(self: *GlobalState, io: Io, target_addr: []const u8, msg: []const u8) !void {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
 
         const group = self.groups.get(target_addr) orelse return error.HwNotConnected;
-
-        const hw = group.c_sender;
-        try hw.write_mutex.lock(io);
-        defer hw.write_mutex.unlock(io);
-
-        var write_buf: [4096]u8 = undefined;
-        var writer = hw.stream.writer(io, &write_buf);
-        const w = &writer.interface;
-        try w.writeAll(msg);
-        try w.flush();
+        try group.c_sender.send(io, msg);
     }
 
     /// Remove an entire HW group (when the HW device disconnects).

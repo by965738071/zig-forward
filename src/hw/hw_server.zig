@@ -122,8 +122,9 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
                 .pc_id = hw_id,
             };
             hw_state.initClient();
+            hw_state.initCSender();
 
-            try state.setCSender(io, hw_id, hw_state);
+            try state.setCSender(io, hw_id, &hw_state.c_sender);
             std.log.info("HW {s} connected and registered", .{hw_id});
 
             defer {

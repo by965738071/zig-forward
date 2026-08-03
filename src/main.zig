@@ -17,24 +17,24 @@ const ws_server = @import("ws_server");
 // ── 全局关闭标志（信号处理器中设置，主循环中检查）──
 var g_shutdown = std.atomic.Value(bool).init(false);
 
+extern fn SetConsoleCtrlHandler(h: *const fn (u32) callconv(.c) c_int, add: c_int) callconv(.c) c_int;
+
 fn setupShutdownHandler() !void {
     if (builtin.os.tag == .windows) {
         // Windows 用 SetConsoleCtrlHandler 捕获 Ctrl+C
-        // x86_64 上 Win32 API 的调用约定就是 .C
-        const HandlerRoutine = *const fn (dwCtrlType: std.os.windows.DWORD) callconv(.c) std.os.windows.BOOL;
+        const HandlerRoutine = *const fn (dwCtrlType: u32) callconv(.c) c_int;
 
         const handler: HandlerRoutine = struct {
-            fn ctrlHandler(dwCtrlType: std.os.windows.DWORD) callconv(.c) std.os.windows.BOOL {
+            fn ctrlHandler(dwCtrlType: u32) callconv(.c) c_int {
                 if (dwCtrlType == 0) { // CTRL_C_EVENT
                     g_shutdown.store(true, .monotonic);
-                    return @as(std.os.windows.BOOL, .true);
+                    return 1;
                 }
-                return @as(std.os.windows.BOOL, .false);
+                return 0;
             }
         }.ctrlHandler;
 
-        const kernel32 = std.os.windows.kernel32;
-        _ = kernel32.SetConsoleCtrlHandler(handler, 1);
+        _ = SetConsoleCtrlHandler(handler, 1);
     } else {
         // POSIX 用 sigaction 捕获 SIGINT/SIGTERM
         const Handler = struct {
@@ -119,7 +119,7 @@ pub fn main(init: std.process.Init) !void {
     // ── 等待关闭信号 ──
     std.log.info("Server started. Press Ctrl+C to stop.", .{});
     while (!g_shutdown.load(.monotonic)) {
-        Io.sleep(init.io, .{ .milliseconds = 200 }, .real) catch {};
+        Io.sleep(init.io, .{ .nanoseconds = 200_000_000 }, .real) catch {};
     }
 
     // ── 优雅关闭 ──
