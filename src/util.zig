@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const cfg = @import("app_config");
 const ConfigType = cfg.ConfigType;
 
@@ -16,6 +17,62 @@ pub const ParsedConfig = struct {
         if (self.ws_host_owned) allocator.free(self.config.ws.host);
     }
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 关闭信号处理（Ctrl+C / SIGTERM）
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── 全局关闭标志（信号处理器中设置，主循环中检查）──
+var g_shutdown = std.atomic.Value(bool).init(false);
+
+extern fn SetConsoleCtrlHandler(h: *const fn (u32) callconv(.c) c_int, add: c_int) callconv(.c) c_int;
+
+/// 注册 Ctrl+C / SIGTERM 处理：收到信号时置位关闭标志。
+/// 主循环通过 `shutdownRequested()` 轮询。
+pub fn setupShutdownHandler() void {
+    if (builtin.os.tag == .windows) {
+        // Windows 用 SetConsoleCtrlHandler 捕获 Ctrl+C
+        const HandlerRoutine = *const fn (dwCtrlType: u32) callconv(.c) c_int;
+
+        const handler: HandlerRoutine = struct {
+            fn ctrlHandler(dwCtrlType: u32) callconv(.c) c_int {
+                if (dwCtrlType == 0) { // CTRL_C_EVENT
+                    g_shutdown.store(true, .monotonic);
+                    return 1;
+                }
+                return 0;
+            }
+        }.ctrlHandler;
+
+        _ = SetConsoleCtrlHandler(handler, 1);
+    } else {
+        // POSIX 用 sigaction 捕获 SIGINT/SIGTERM
+        const posix = std.posix;
+
+        const Handler = struct {
+            fn handler(sig: posix.SIG) callconv(.c) void {
+                _ = sig;
+                g_shutdown.store(true, .monotonic);
+            }
+        };
+
+        const mask = posix.sigemptyset();
+
+        var sa: posix.Sigaction = .{
+            .handler = .{ .handler = Handler.handler },
+            .mask = mask,
+            .flags = 0,
+        };
+
+        posix.sigaction(posix.SIG.INT, &sa, null);
+        posix.sigaction(posix.SIG.TERM, &sa, null);
+    }
+}
+
+/// 是否已收到关闭信号（Ctrl+C / SIGTERM）
+pub fn shutdownRequested() bool {
+    return g_shutdown.load(.monotonic);
+}
 
 /// Parse CLI arguments and return a runtime config.
 /// Returns `error.HelpRequested` if `--help` or `-h` is present (caller should return

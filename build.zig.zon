@@ -31,10 +31,16 @@
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
-    .dependencies = .{ .websocket = .{
-        .url = "git+https://github.com/karlseguin/websocket.zig#dev",
-        .hash = "websocket-0.1.0-ZPISdY8QBQBPBhPzG-2WjIckQW_9l2vkUXrvgEkyEfMM",
-    } },
+    .dependencies = .{
+        .websocket = .{
+            .url = "git+https://github.com/karlseguin/websocket.zig#dev",
+            .hash = "websocket-0.1.0-ZPISdY8QBQBPBhPzG-2WjIckQW_9l2vkUXrvgEkyEfMM",
+        },
+        .zio = .{
+            .url = "git+https://github.com/lalinsky/zio?ref=zig-0.17#407427a21f3ac0ecb20847e146535465d7ad3d16",
+            .hash = "zio-0.16.0-xHbVVIvlIwAtXnRvRtdni09wYZVJgHuXN4YKoOKIwHsr",
+        },
+    },
     // Specifies the set of files and directories that are included in this package.
     // Only files and directories listed here are included in the `hash` that
     // is computed for this package. Only files listed here will remain on disk

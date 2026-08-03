@@ -57,6 +57,23 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    // 应用组装模块（src/app.zig）：持有三个服务器，负责编排启动/停止。
+    // 测试/benchmark 也通过 `@import("app")` 访问其中的 config 重导出。
+    const app_mod = b.addModule("app", .{
+        .root_source_file = b.path("src/app.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "app_config", .module = app_config_mod },
+            .{ .name = "pc_server", .module = pc_server_mod },
+            .{ .name = "hw_server", .module = hw_server },
+            .{ .name = "parser", .module = parser_mod },
+            .{ .name = "util", .module = util_mod },
+            .{ .name = "ws_server", .module = ws_server_mod },
+            .{ .name = "websocket", .module = websocket.module("websocket") },
+        },
+    });
+
     const exe = b.addExecutable(.{
         .name = "zig_forward",
         .root_module = b.createModule(.{
@@ -65,13 +82,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
-                .{ .name = "app_config", .module = app_config_mod },
-                .{ .name = "pc_server", .module = pc_server_mod },
-                .{ .name = "hw_server", .module = hw_server },
-                .{ .name = "parser", .module = parser_mod },
+                .{ .name = "app", .module = app_mod },
                 .{ .name = "util", .module = util_mod },
-                .{ .name = "ws_server", .module = ws_server_mod },
-                .{ .name = "websocket", .module = websocket.module("websocket") },
             },
         }),
     });
@@ -88,22 +100,6 @@ pub fn build(b: *std.Build) void {
         .root_module = exe.root_module,
     });
     const run_exe_tests = b.addRunArtifact(exe_tests);
-
-    // ── Single "app" module covering all src/ files ──
-    const app_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "app_config", .module = app_config_mod },
-            .{ .name = "pc_server", .module = pc_server_mod },
-            .{ .name = "hw_server", .module = hw_server },
-            .{ .name = "parser", .module = parser_mod },
-            .{ .name = "util", .module = util_mod },
-            .{ .name = "ws_server", .module = ws_server_mod },
-            .{ .name = "websocket", .module = websocket.module("websocket") },
-        },
-    });
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_tests.step);

@@ -57,13 +57,21 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
             self._stopped = true;
             if (self.listener != null) {
                 // 自连接：连接到 listener 地址，使阻塞的 accept() 返回
-                self.connectToSelf() catch {};
+                self.connectToSelf() catch |err| {
+                    std.log.warn("HW self-connect failed: {} (shutdown may hang)", .{err});
+                };
             }
         }
 
-        /// 自连接到 listener 以解除 accept() 阻塞
+        /// 自连接到 listener 以解除 accept() 阻塞。
+        /// 绑定 0.0.0.0（通配）时回连 127.0.0.1；绑定具体 IP 时回连该 IP 本身，
+        /// 否则自连接会被拒绝，导致优雅停机挂起。
         fn connectToSelf(self: *Self) !void {
-            const addr = try net.IpAddress.parseIp4("127.0.0.1", self.port);
+            const host = if (self.host.len == 0 or std.mem.eql(u8, self.host, "0.0.0.0"))
+                "127.0.0.1"
+            else
+                self.host;
+            const addr = try net.IpAddress.parseIp4(host, self.port);
             const stream = try addr.connect(self.io, .{ .mode = .stream });
             stream.close(self.io);
         }
