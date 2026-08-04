@@ -373,7 +373,7 @@ pub const GlobalState = struct {
     }
 
     /// Remove an entire HW group (when the HW device disconnects).
-    /// Closes all A-side client connections through AClient.close().
+    /// Closes both A-side and C-side connections through their respective interfaces.
     /// The close is done *after* releasing the lock to avoid deadlock.
     pub fn removeGroup(self: *GlobalState, io: Io, addr: []const u8) void {
         self.mutex.lock(io) catch |err| {
@@ -381,10 +381,11 @@ pub const GlobalState = struct {
             return;
         };
 
-        // Collect AClient pointers before freeing the group,
+        // Collect AClient and CSender pointers before freeing the group,
         // so we can close them outside the lock.
         var clients_to_close: [64]*AClient = undefined;
         var clients_to_close_count: usize = 0;
+        var c_sender_to_close: ?*CSender = null;
 
         if (self.groups.fetchRemove(addr)) |kv| {
             var it = kv.value.a_clients.iterator();
@@ -394,6 +395,8 @@ pub const GlobalState = struct {
                     clients_to_close_count += 1;
                 }
             }
+            // 保存 C-side sender，在锁外关闭以解阻塞 handler 线程
+            c_sender_to_close = kv.value.c_sender;
             self.allocator.free(kv.key);
             kv.value.deinit(self.allocator);
             self.allocator.destroy(kv.value);
@@ -401,11 +404,39 @@ pub const GlobalState = struct {
 
         self.mutex.unlock(io);
 
+        // 关闭 C-side（HW）连接 — 解阻塞 handler 线程的 parser.parse()
+        if (c_sender_to_close) |s| {
+            s.close(io);
+        }
+
         // 通过 AClient.close() 关闭所有客户端连接（不关心传输协议）
         // TCP 实现会设置 stream_closed=true 并关闭 stream，触发 PC 端的 defer 清理
         // WS 实现是空操作，WS 生命周期由 websocket 库管理
         for (clients_to_close[0..clients_to_close_count]) |client| {
             client.close(io);
+        }
+    }
+
+    /// 关闭所有 HW 组（关机时调用，解阻塞所有 handler 线程）。
+    /// 收集所有组地址后逐个调用 removeGroup，避免在迭代时修改 HashMap。
+    pub fn closeAllGroups(self: *GlobalState, io: Io) void {
+        // 1. 持锁收集所有组地址
+        self.mutex.lock(io) catch |err| {
+            std.log.warn("closeAllGroups: lock failed ({s})", .{@errorName(err)});
+            return;
+        };
+        var addrs: std.ArrayList([]const u8) = .empty;
+        var it = self.groups.iterator();
+        while (it.next()) |entry| {
+            addrs.append(self.allocator, entry.key_ptr.*) catch {};
+        }
+        self.mutex.unlock(io);
+        // 地址由 removeGroup 内部（fetchRemove 的 kv.key）释放，这里不再重复 free
+        defer addrs.deinit(self.allocator);
+
+        // 2. 逐个关闭（removeGroup 内部会获取锁）
+        for (addrs.items) |addr| {
+            self.removeGroup(io, addr);
         }
     }
 };

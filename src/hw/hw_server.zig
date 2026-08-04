@@ -25,10 +25,10 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
         host: []const u8,
         port: u16,
         registry: HandlerRegistry(IdType),
-        /// 监听 socket，start() 时创建，stop() 时关闭
+        /// 监听 socket，start() 时创建，deinit() 时关闭
         listener: ?net.Server = null,
-        /// 标记已请求停止
-        _stopped: bool = false,
+        /// 活跃的 handler 协程（通过 Io.Group 管理）
+        handler_group: std.Io.Group = .init,
 
         pub fn init(allocator: std.mem.Allocator, state: *GlobalState, io: Io, host: []const u8, port: u16) Self {
             return .{
@@ -42,6 +42,7 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
         }
 
         pub fn deinit(self: *Self) void {
+            self.handler_group.cancel(self.io);
             self.registry.deinit();
             if (self.listener) |*s| {
                 s.deinit(self.io);
@@ -49,60 +50,29 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
             }
         }
 
-        /// 停止服务器。
-        /// 设置停止标志，然后自连接解除 accept() 阻塞。
-        /// 不直接关闭 listener（Windows 上 pending accept 的 .CANCELLED 会导致 panic），
-        /// listener 由 deinit() 在 accept 循环退出后安全关闭。
-        pub fn stop(self: *Self) void {
-            self._stopped = true;
-            if (self.listener != null) {
-                // 自连接：连接到 listener 地址，使阻塞的 accept() 返回
-                self.connectToSelf() catch |err| {
-                    std.log.warn("HW self-connect failed: {} (shutdown may hang)", .{err});
-                };
-            }
-        }
-
-        /// 自连接到 listener 以解除 accept() 阻塞。
-        /// 绑定 0.0.0.0（通配）时回连 127.0.0.1；绑定具体 IP 时回连该 IP 本身，
-        /// 否则自连接会被拒绝，导致优雅停机挂起。
-        fn connectToSelf(self: *Self) !void {
-            const host = if (self.host.len == 0 or std.mem.eql(u8, self.host, "0.0.0.0"))
-                "127.0.0.1"
-            else
-                self.host;
-            const addr = try net.IpAddress.parseIp4(host, self.port);
-            const stream = try addr.connect(self.io, .{ .mode = .stream });
-            stream.close(self.io);
-        }
-
         pub fn start(self: *Self) !void {
             const addr = try net.IpAddress.parseIp4(self.host, self.port);
             self.listener = try addr.listen(self.io, .{});
-            errdefer self.stop();
-
-            // 如果在创建 listener 之前 stop() 已被调用，立即关闭
-            if (self._stopped) {
-                self.stop();
-                return;
+            errdefer {
+                if (self.listener) |*s| {
+                    s.deinit(self.io);
+                    self.listener = null;
+                }
             }
 
             std.log.info("HW server listening on {s}:{d}", .{ self.host, self.port });
 
             while (true) {
-                if (self._stopped) break;
-                const stream = self.listener.?.accept(self.io) catch |err| {
-                    if (self._stopped) break; // 被 stop() 关闭，正常退出
-                    std.log.err("HW server accept failed: {}", .{err});
-                    return err;
+                const stream = self.listener.?.accept(self.io) catch |err| switch (err) {
+                    error.Canceled => break, // 通过 Group.cancel() 正常关闭
+                    else => {
+                        std.log.err("HW server accept failed: {}", .{err});
+                        return err;
+                    },
                 };
-                if (self._stopped) {
-                    stream.close(self.io);
-                    break;
-                }
                 std.log.info("HW device connected", .{});
 
-                _ = Io.concurrent(self.io, struct {
+                self.handler_group.concurrent(self.io, struct {
                     fn run(s: *Self, st: net.Stream) void {
                         s.handleHwInner(st) catch |err| {
                             std.log.warn("HW device disconnected ({})", .{err});
@@ -152,7 +122,9 @@ pub fn HwServer(comptime IdType: type, comptime Parser: type) type {
 
             defer {
                 state.removeGroup(io, hw_id);
-                stream.close(io);
+                if (!hw_state.stream_closed) {
+                    stream.close(io);
+                }
                 allocator.destroy(hw_state);
             }
 

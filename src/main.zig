@@ -10,8 +10,8 @@ pub fn main(init: std.process.Init) !void {
         if (check == .leak) {
             std.log.err("memory leak", .{});
             std.debug.panic("memory leak", .{});
-        }else {
-            std.log.info("正常退出", .{});
+        } else {
+            std.log.info("success exit", .{});
         }
     }
     const allocator = debug_allocator.allocator();
@@ -24,7 +24,8 @@ pub fn main(init: std.process.Init) !void {
     defer runtime_config.deinit(allocator);
 
     // ── 初始化三个服务器并运行（阻塞到 Ctrl+C）──
-    var app = try App.init(allocator, init.io, &runtime_config.config);
+    var app: App = undefined;
+    try app.init(allocator, init.io, &runtime_config.config);
     defer app.deinit();
 
     app.run();

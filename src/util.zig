@@ -25,25 +25,25 @@ pub const ParsedConfig = struct {
 // ── 全局关闭标志（信号处理器中设置，主循环中检查）──
 var g_shutdown = std.atomic.Value(bool).init(false);
 
-extern fn SetConsoleCtrlHandler(h: *const fn (u32) callconv(.c) c_int, add: c_int) callconv(.c) c_int;
-
 /// 注册 Ctrl+C / SIGTERM 处理：收到信号时置位关闭标志。
 /// 主循环通过 `shutdownRequested()` 轮询。
 pub fn setupShutdownHandler() void {
     if (builtin.os.tag == .windows) {
         // Windows 用 SetConsoleCtrlHandler 捕获 Ctrl+C
-        const HandlerRoutine = *const fn (dwCtrlType: u32) callconv(.c) c_int;
+        const HandlerRoutine = *const fn (dwCtrlType: u32) callconv(.c) std.os.windows.BOOL;
 
         const handler: HandlerRoutine = struct {
-            fn ctrlHandler(dwCtrlType: u32) callconv(.c) c_int {
+            fn ctrlHandler(dwCtrlType: u32) callconv(.c) std.os.windows.BOOL {
                 if (dwCtrlType == 0) { // CTRL_C_EVENT
                     g_shutdown.store(true, .monotonic);
-                    return 1;
+                    return @fromBackingInt(@intCast(1));
                 }
-                return 0;
+                return @fromBackingInt(@intCast(0));
             }
         }.ctrlHandler;
 
+        // SetConsoleCtrlHandler 在 Zig 的 kernel32 绑定中可能不存在，使用 extern
+        const SetConsoleCtrlHandler = @extern(*const fn (h: HandlerRoutine, add: c_int) callconv(.c) std.os.windows.BOOL, .{ .name = "SetConsoleCtrlHandler" });
         _ = SetConsoleCtrlHandler(handler, 1);
     } else {
         // POSIX 用 sigaction 捕获 SIGINT/SIGTERM

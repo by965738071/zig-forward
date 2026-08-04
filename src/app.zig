@@ -27,35 +27,32 @@ pub const App = struct {
     hw_server: HwServer([]const u8, JsonLineParser([]const u8)),
     ws_app: ws_server.App,
 
-    pub fn init(allocator: std.mem.Allocator, io: Io, cfg_ptr: *const ConfigType) !App {
-        var app: App = undefined;
-        app.allocator = allocator;
-        app.io = io;
-        app.config = cfg_ptr.*;
+    pub fn init(self: *App, allocator: std.mem.Allocator, io: Io, cfg_ptr: *const ConfigType) !void {
+        self.allocator = allocator;
+        self.io = io;
+        self.config = cfg_ptr.*;
 
-        app.state = GlobalState.init(allocator);
-        errdefer app.state.deinit();
+        self.state = GlobalState.init(allocator);
+        errdefer self.state.deinit();
 
-        app.pc_server = PcServer(u8, ByteParser()).init(allocator, &app.state, io, app.config);
-        errdefer app.pc_server.deinit();
+        self.pc_server = PcServer(u8, ByteParser()).init(allocator, &self.state, io, self.config);
+        errdefer self.pc_server.deinit();
         for (cfg_ptr.commands) |cmd| {
-            try app.pc_server.registerCommand(cmd.id, cmd.handler);
+            try self.pc_server.registerCommand(cmd.id, cmd.handler);
         }
 
-        app.hw_server = HwServer([]const u8, JsonLineParser([]const u8))
-            .init(allocator, &app.state, io, cfg_ptr.hw.host, cfg_ptr.hw.port);
-        errdefer app.hw_server.deinit();
+        self.hw_server = HwServer([]const u8, JsonLineParser([]const u8))
+            .init(allocator, &self.state, io, cfg_ptr.hw.host, cfg_ptr.hw.port);
+        errdefer self.hw_server.deinit();
         for (cfg_ptr.hw_commands) |cmd| {
-            try app.hw_server.registerCommand(cmd.name, cmd.handler);
+            try self.hw_server.registerCommand(cmd.name, cmd.handler);
         }
         if (cfg_ptr.hw_default_handler) |h| {
-            app.hw_server.setDefault(h);
+            self.hw_server.setDefault(h);
         }
 
-        app.ws_app = ws_server.App.init(allocator, io, &app.state);
-        errdefer app.ws_app.deinit();
-
-        return app;
+        self.ws_app = ws_server.App.init(allocator, io, &self.state);
+        errdefer self.ws_app.deinit();
     }
 
     pub fn deinit(self: *App) void {
@@ -66,25 +63,34 @@ pub const App = struct {
     }
 
     /// 启动三个服务器并阻塞等待关闭信号（Ctrl+C / SIGTERM）。
-    /// 收到信号后优雅关闭所有服务器，等待协程退出。
+    /// 收到信号后通过 Io.Group.cancel() 优雅关闭所有服务器协程。
     pub fn run(self: *App) void {
         const rc = &self.config;
         std.log.info("Zig Forward starting — PC:{s}:{d}  HW:{s}:{d}  WS:{s}:{d}", .{ rc.pc.host, rc.pc.port, rc.hw.host, rc.hw.port, rc.ws.host, rc.ws.port });
 
-        // ── 在三个 Io.async 协程中启动服务器 ──
-        var pc_future = Io.async(self.io, struct {
+        // ── 使用 Io.Group 管理三个服务器协程 ──
+        // Group.cancel() 通过 Io vtable 的 alertable 路径取消 pending 的 accept()
+        var group: std.Io.Group = .init;
+
+        group.async(self.io, struct {
             fn run(app: *App) void {
-                app.pc_server.start() catch |err| std.log.err("PC server exited: {}", .{err});
+                app.pc_server.start() catch |err| switch (err) {
+                    error.Canceled => {},
+                    else => std.log.err("PC server exited: {}", .{err}),
+                };
             }
         }.run, .{self});
 
-        var hw_future = Io.async(self.io, struct {
+        group.async(self.io, struct {
             fn run(app: *App) void {
-                app.hw_server.start() catch |err| std.log.err("HW server exited: {}", .{err});
+                app.hw_server.start() catch |err| switch (err) {
+                    error.Canceled => {},
+                    else => std.log.err("HW server exited: {}", .{err}),
+                };
             }
         }.run, .{self});
 
-        var ws_future = Io.async(self.io, struct {
+        group.async(self.io, struct {
             fn run(app: *App) void {
                 ws_server.startWithApp(&app.ws_app, app.config.ws.host, app.config.ws.port) catch |err| std.log.err("WS server exited: {}", .{err});
             }
@@ -98,13 +104,17 @@ pub const App = struct {
 
         // ── 优雅关闭 ──
         std.log.info("Shutting down...", .{});
-        self.pc_server.stop();
-        self.hw_server.stop();
+        // WS 服务器使用原始 posix.accept（不走 Io vtable），需要先显式 stop()
         self.ws_app.stop();
+        // 取消 accept 循环（PC/HW 服务器通过 Io vtable 的 alertable 路径取消）
+        group.cancel(self.io);
 
-        // 等待服务器协程退出（它们检测到 stop 后应很快返回）
-        pc_future.await(self.io);
-        hw_future.await(self.io);
-        ws_future.await(self.io);
+        // 取消所有 handler 协程（Group.cancel 会发送取消信号并等待所有任务完成）
+        self.pc_server.handler_group.cancel(self.io);
+        self.hw_server.handler_group.cancel(self.io);
+        std.log.info("所有 handler 已退出", .{});
+
+        // 安全网：清理任何残留的组状态
+        self.state.closeAllGroups(self.io);
     }
 };
