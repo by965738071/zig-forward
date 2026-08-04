@@ -1,53 +1,27 @@
 const std = @import("std");
+const Id = @import("parser").Id;
 const HandlerRegistry = @import("handler_registry.zig").HandlerRegistry;
 
-// ── PC 端 ────────────────────────────────
+// ── 命令条目 ─────────────────────────────
+// 统一使用 Frame.Id 作为命令标识，不再为每种 IdType 定义不同类型。
 
-/// PC 命令处理函数签名（IdType = u8，二进制协议）
-pub const HandlerFn = HandlerRegistry(u8).Handler;
+pub const Handler = HandlerRegistry.Handler;
 
-/// PC 命令条目
 pub const CommandEntry = struct {
-    id: u8,
-    handler: HandlerFn,
+    id: Id,
+    handler: Handler,
 };
 
-// ── HW 端 ────────────────────────────────
+pub const HwCommandEntry = CommandEntry; // PC/HW 共用同一结构
 
-/// HW 命令处理函数签名
-pub const HwHandlerFn = HandlerRegistry([]const u8).Handler;
+// ── PC 二进制协议命令码 ─────────────────────────────
+// 业务数据命令（0x01-0x0F）走 HandlerRegistry dispatch。
+// 控制权命令（0x10-0x13）由 pc_server 内部拦截，直接调用 state.* API。
 
-/// HW 命令条目
-pub const HwCommandEntry = struct {
-    name: []const u8,
-    handler: HwHandlerFn,
-};
-
-// ── 处理函数 ─────────────────────────────
-
-// PC handler
-fn handleBoxStatus(cmd: u8, data: []const u8, alloc: std.mem.Allocator) anyerror!?[]u8 {
-    _ = data;
-    const result = try std.fmt.allocPrint(alloc, "boxStatus ok cmd={}", .{cmd});
-    return @as(?[]u8, result);
-}
-
-fn handleBoxVoltage(cmd: u8, data: []const u8, alloc: std.mem.Allocator) anyerror!?[]u8 {
-    _ = data;
-    const result = try std.fmt.allocPrint(alloc, "boxVoltage ok cmd={}", .{cmd});
-    return @as(?[]u8, result);
-}
-
-// HW 默认处理：收到啥广播啥
-fn hwDefaultHandler(_: []const u8, data: []const u8, allocator: std.mem.Allocator) anyerror!?[]u8 {
-    const result = try allocator.dupe(u8, data);
-    return @as(?[]u8, result);
-}
-
-fn handleHwBox(_: []const u8, data: []const u8, allocator: std.mem.Allocator) anyerror!?[]u8 {
-    const result = try std.fmt.allocPrint(allocator, "{{\"from\":\"hw\",\"data\":\"{s}\"}}", .{data});
-    return @as(?[]u8, result);
-}
+pub const CMD_REQUEST_CONTROL: u8 = 0x10;
+pub const CMD_RELEASE_CONTROL: u8 = 0x11;
+pub const CMD_HEARTBEAT: u8 = 0x12;
+pub const CMD_GET_STATUS: u8 = 0x13;
 
 // ── 配置字段 ─────────────────────────────
 
@@ -68,17 +42,3 @@ ws: struct {
     host: []const u8,
     port: u16,
 } = .{ .host = "0.0.0.0", .port = 9224 },
-
-/// PC 命令路由表（在这里添加/删除命令映射）
-commands: []const CommandEntry = &.{
-    .{ .id = 0x01, .handler = handleBoxStatus },
-    .{ .id = 0x02, .handler = handleBoxVoltage },
-},
-
-/// HW 命令路由表
-hw_commands: []const HwCommandEntry = &.{
-    .{ .name = "box", .handler = handleHwBox },
-},
-
-/// HW 默认处理函数（没有匹配命令时使用，null 表示丢弃）
-hw_default_handler: ?HwHandlerFn = hwDefaultHandler,

@@ -1,5 +1,4 @@
 const std = @import("std");
-const net = std.Io.net;
 
 /// Hex-encode bytes to uppercase hex string.
 /// Caller owns the returned memory.
@@ -19,20 +18,6 @@ pub fn currentTimestamp(io: std.Io) i64 {
     const ts = std.Io.Clock.now(.real, io);
     // Convert nanoseconds to milliseconds
     return @divFloor(@as(i64, @intCast(ts.nanoseconds)), 1_000_000);
-}
-
-/// Read a single line (\n-terminated) from a buffered reader.
-/// Returns `error.EndOfStream` when the connection is closed before any data.
-/// Caller owns the returned memory.
-///
-/// Uses `Io.Reader.takeDelimiter` internally (buffer-capacity-limited).
-pub fn readLine(reader: *std.Io.Reader, allocator: std.mem.Allocator) ![]u8 {
-    const line = try reader.takeDelimiter('\n') orelse return error.EndOfStream;
-    // Strip trailing \r (e.g. from \r\n line endings)
-    if (line.len > 0 and line[line.len - 1] == '\n') {
-        return try allocator.dupe(u8, line[0 .. line.len - 1]);
-    }
-    return try allocator.dupe(u8, line);
 }
 
 test "currentTimestamp returns plausible value" {

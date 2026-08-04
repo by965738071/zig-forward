@@ -1,148 +1,21 @@
 const std = @import("std");
 const Io = std.Io;
-const net = Io.net;
+const AClient = @import("transport").tcp.AClient;
+const CSender = @import("transport").tcp.CSender;
 const currentTimestamp = @import("util.zig").currentTimestamp;
 
 /// Lease duration for control rights (milliseconds).
 pub const LEASE_DURATION_MS: i64 = 5000;
 
 // ════════════════════════════════════════════════════════════════════
-//  AClient 接口：业务层与传输层之间的契约
-// ════════════════════════════════════════════════════════════════════
-
-/// AClient 是业务层（GlobalState/Group）向客户端发送数据的抽象接口。
-/// 业务层不关心底层是 TCP、WebSocket、MQTT 还是其他协议。
-/// 每加一种传输协议，只需要实现 send/close 两个函数，业务层零改动。
-pub const AClient = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        send: *const fn (ptr: *anyopaque, io: Io, data: []const u8) anyerror!void,
-        close: *const fn (ptr: *anyopaque, io: Io) void,
-    };
-
-    pub fn send(self: *const AClient, io: Io, data: []const u8) !void {
-        return self.vtable.send(self.ptr, io, data);
-    }
-
-    pub fn close(self: *const AClient, io: Io) void {
-        return self.vtable.close(self.ptr, io);
-    }
-};
-
-// ════════════════════════════════════════════════════════════════════
-//  CSender 接口：业务层向 HW 设备发送数据的抽象接口
-// ════════════════════════════════════════════════════════════════════
-
-/// CSender 是业务层（GlobalState/Group）向 HW 设备（C 端）发送数据的抽象接口。
-/// 与 AClient 对称，使 C 端传输协议也可替换（TCP、MQTT、QUIC 等）。
-pub const CSender = struct {
-    ptr: *anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        send: *const fn (ptr: *anyopaque, io: Io, data: []const u8) anyerror!void,
-        close: *const fn (ptr: *anyopaque, io: Io) void,
-    };
-
-    pub fn send(self: *CSender, io: Io, data: []const u8) !void {
-        return self.vtable.send(self.ptr, io, data);
-    }
-
-    pub fn close(self: *CSender, io: Io) void {
-        return self.vtable.close(self.ptr, io);
-    }
-};
-
-// ════════════════════════════════════════════════════════════════════
-//  TCP 传输层实现（同时实现 AClient 和 CSender）
-// ════════════════════════════════════════════════════════════════════
-
-/// Per-connection state shared via GlobalState.
-/// Used for both PC clients and HW connections.
-pub const PcClientState = struct {
-    stream: net.Stream,
-    io: Io,
-    allocator: std.mem.Allocator,
-    write_mutex: Io.Mutex = .init,
-    pc_id: []const u8,
-    /// Set to true when the stream has been closed by removeGroup.
-    /// Used to prevent double-close with handlePcClientInner's defer block.
-    stream_closed: bool = false,
-    /// 嵌入的 AClient 接口（指针稳定，可传给 addAClient）
-    client: AClient = undefined,
-    /// 嵌入的 CSender 接口（指针稳定，可传给 setCSender）
-    c_sender: CSender = undefined,
-
-    /// 初始化嵌入的 AClient（传入 addAClient 时用 &self.client）
-    pub fn initClient(self: *PcClientState) void {
-        self.client = .{ .ptr = self, .vtable = &tcp_vtable };
-    }
-
-    /// 初始化嵌入的 CSender（传入 setCSender 时用 &self.c_sender）
-    pub fn initCSender(self: *PcClientState) void {
-        self.c_sender = .{ .ptr = self, .vtable = &tcp_c_sender_vtable };
-    }
-
-    /// 将此 TCP 客户端包装为 AClient 接口（临时值，不能取地址传）
-    pub fn asClient(self: *PcClientState) AClient {
-        return .{ .ptr = self, .vtable = &tcp_vtable };
-    }
-
-    fn tcpSend(ptr: *anyopaque, io: Io, data: []const u8) !void {
-        const self: *PcClientState = @ptrCast(@alignCast(ptr));
-        try self.write_mutex.lock(io);
-        defer self.write_mutex.unlock(io);
-        var write_buf: [4096]u8 = undefined;
-        var writer = self.stream.writer(io, &write_buf);
-        try writer.interface.writeAll(data);
-        try writer.interface.writeByte('\n'); // TCP 行分隔符
-        try writer.interface.flush();
-    }
-
-    fn tcpClose(ptr: *anyopaque, io: Io) void {
-        const self: *PcClientState = @ptrCast(@alignCast(ptr));
-        self.stream_closed = true;
-        self.stream.close(io);
-    }
-
-    fn tcpCSenderSend(ptr: *anyopaque, io: Io, data: []const u8) !void {
-        const self: *PcClientState = @ptrCast(@alignCast(ptr));
-        try self.write_mutex.lock(io);
-        defer self.write_mutex.unlock(io);
-        var write_buf: [4096]u8 = undefined;
-        var writer = self.stream.writer(io, &write_buf);
-        try writer.interface.writeAll(data);
-        try writer.interface.flush();
-    }
-
-    fn tcpCSenderClose(ptr: *anyopaque, io: Io) void {
-        const self: *PcClientState = @ptrCast(@alignCast(ptr));
-        self.stream_closed = true;
-        self.stream.close(io);
-    }
-
-    const tcp_vtable = AClient.VTable{
-        .send = tcpSend,
-        .close = tcpClose,
-    };
-
-    const tcp_c_sender_vtable = CSender.VTable{
-        .send = tcpCSenderSend,
-        .close = tcpCSenderClose,
-    };
-};
-
-// ════════════════════════════════════════════════════════════════════
-//  业务层
+//  业务层：Group / GlobalState
+//  传输层细节（TCP/WS）通过 AClient / CSender 接口隔离，定义在 transport/ 模块。
 // ════════════════════════════════════════════════════════════════════
 
 /// A group associates one HW device (C-side) with zero or more PC
 /// control clients (A-side).
 pub const Group = struct {
     /// a_clients 存储 *AClient 接口指针，不关心底层传输协议。
-    /// TCP 客户端传 &PcClientState.asClient()，WS 客户端传 &WsClientState.client。
     a_clients: std.StringHashMap(*AClient),
     /// c_sender 是向 HW 设备（C 端）发送数据的接口，不关心底层传输协议。
     c_sender: *CSender,
@@ -216,7 +89,6 @@ pub const GlobalState = struct {
     }
 
     /// Add an A-side client to an existing HW group.
-    /// client 是 *AClient 接口，TCP/WS/MQTT 客户端均可注册。
     pub fn addAClient(
         self: *GlobalState,
         io: Io,
@@ -239,7 +111,6 @@ pub const GlobalState = struct {
     }
 
     /// Remove an A-side client from a specific HW group.
-    /// If the removed client was the control owner, control is released.
     pub fn removeAClient(self: *GlobalState, io: Io, target_addr: []const u8, a_id: []const u8) !void {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
@@ -260,27 +131,19 @@ pub const GlobalState = struct {
     }
 
     /// Broadcast a pre-built JSON string to all A-side clients in a group.
-    /// 先收集客户端快照再释放锁，逐个通过 AClient.send() 发送。
+    /// 持锁遍历并发送：客户端（*AClient）由各自的 handler 拥有，可能在锁外被
+    /// disconnect 的 defer 块释放。若先做指针快照再解锁逐个发送，解锁后指针
+    /// 可能已 use-after-free。本地硬件管理规模下，在锁内发送（与 sendToC 一致）。
     /// 传输层细节（TCP 换行符、WS 帧格式）由各协议的 send 实现处理。
     pub fn broadcastToA(self: *GlobalState, io: Io, hw_addr: []const u8, json: []const u8) !void {
-        // 1. 持锁收集客户端快照
-        const clients = blk: {
-            try self.mutex.lock(io);
-            defer self.mutex.unlock(io);
+        try self.mutex.lock(io);
+        defer self.mutex.unlock(io);
 
-            const group = self.groups.get(hw_addr) orelse return;
+        const group = self.groups.get(hw_addr) orelse return;
 
-            var list: std.ArrayList(*AClient) = .empty;
-            var it = group.a_clients.iterator();
-            while (it.next()) |entry| {
-                try list.append(self.allocator, entry.value_ptr.*);
-            }
-            break :blk try list.toOwnedSlice(self.allocator);
-        };
-        defer self.allocator.free(clients);
-
-        // 2. 无锁逐个发送（通过 AClient 接口，不关心底层协议）
-        for (clients) |client| {
+        var it = group.a_clients.iterator();
+        while (it.next()) |entry| {
+            const client = entry.value_ptr.*;
             client.send(io, json) catch |err| {
                 std.log.warn("broadcastToA: send failed: {s}", .{@errorName(err)});
                 continue;
@@ -312,11 +175,8 @@ pub const GlobalState = struct {
     }
 
     /// Release control of a HW group (Layer 1).
-    pub fn releaseControl(self: *GlobalState, io: Io, target_addr: []const u8) void {
-        self.mutex.lock(io) catch |err| {
-            std.log.warn("releaseControl: lock failed ({s}), target {s}", .{ @errorName(err), target_addr });
-            return;
-        };
+    pub fn releaseControl(self: *GlobalState, io: Io, target_addr: []const u8) !void {
+        try self.mutex.lock(io);
         defer self.mutex.unlock(io);
 
         const group = self.groups.get(target_addr) orelse return;
@@ -363,7 +223,6 @@ pub const GlobalState = struct {
     }
 
     /// Forward a message from a PC client to the HW device.
-    /// 通过 CSender 接口发送，不关心底层传输协议（TCP/MQTT/QUIC 等）。
     pub fn sendToC(self: *GlobalState, io: Io, target_addr: []const u8, msg: []const u8) !void {
         try self.mutex.lock(io);
         defer self.mutex.unlock(io);
@@ -381,21 +240,16 @@ pub const GlobalState = struct {
             return;
         };
 
-        // Collect AClient and CSender pointers before freeing the group,
-        // so we can close them outside the lock.
-        var clients_to_close: [64]*AClient = undefined;
-        var clients_to_close_count: usize = 0;
+        // 动态收集 AClient/CSender 指针，避免固定数组容量上限
+        var clients_to_close: std.ArrayList(*AClient) = .empty;
+        defer clients_to_close.deinit(self.allocator);
         var c_sender_to_close: ?*CSender = null;
 
         if (self.groups.fetchRemove(addr)) |kv| {
             var it = kv.value.a_clients.iterator();
             while (it.next()) |entry| {
-                if (clients_to_close_count < clients_to_close.len) {
-                    clients_to_close[clients_to_close_count] = entry.value_ptr.*;
-                    clients_to_close_count += 1;
-                }
+                clients_to_close.append(self.allocator, entry.value_ptr.*) catch continue;
             }
-            // 保存 C-side sender，在锁外关闭以解阻塞 handler 线程
             c_sender_to_close = kv.value.c_sender;
             self.allocator.free(kv.key);
             kv.value.deinit(self.allocator);
@@ -410,17 +264,13 @@ pub const GlobalState = struct {
         }
 
         // 通过 AClient.close() 关闭所有客户端连接（不关心传输协议）
-        // TCP 实现会设置 stream_closed=true 并关闭 stream，触发 PC 端的 defer 清理
-        // WS 实现是空操作，WS 生命周期由 websocket 库管理
-        for (clients_to_close[0..clients_to_close_count]) |client| {
+        for (clients_to_close.items) |client| {
             client.close(io);
         }
     }
 
     /// 关闭所有 HW 组（关机时调用，解阻塞所有 handler 线程）。
-    /// 收集所有组地址后逐个调用 removeGroup，避免在迭代时修改 HashMap。
     pub fn closeAllGroups(self: *GlobalState, io: Io) void {
-        // 1. 持锁收集所有组地址
         self.mutex.lock(io) catch |err| {
             std.log.warn("closeAllGroups: lock failed ({s})", .{@errorName(err)});
             return;
@@ -431,10 +281,8 @@ pub const GlobalState = struct {
             addrs.append(self.allocator, entry.key_ptr.*) catch {};
         }
         self.mutex.unlock(io);
-        // 地址由 removeGroup 内部（fetchRemove 的 kv.key）释放，这里不再重复 free
         defer addrs.deinit(self.allocator);
 
-        // 2. 逐个关闭（removeGroup 内部会获取锁）
         for (addrs.items) |addr| {
             self.removeGroup(io, addr);
         }

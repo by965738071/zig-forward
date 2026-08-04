@@ -6,17 +6,61 @@ pub fn build(b: *std.Build) void {
 
     const websocket = b.dependency("websocket", .{});
 
+    // ── 编解码原语（无外部依赖，被 parser 和测试引用）──
+    const codec_mod = b.addModule("codec", .{
+        .root_source_file = b.path("src/codec/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // ── 传输层（依赖 Io + websocket，定义 AClient/CSender 接口及 TCP/WS 实现）──
+    const transport_mod = b.addModule("transport", .{
+        .root_source_file = b.path("src/transport/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "websocket", .module = websocket.module("websocket") },
+        },
+    });
+
+    const parser_mod = b.addModule("parser", .{
+        .root_source_file = b.path("src/parser/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "codec", .module = codec_mod },
+        },
+    });
+
+    // ── 配置/状态层（依赖 transport 拿 AClient/CSender，依赖 parser 拿 Frame/Id）──
     const app_config_mod = b.addModule("app_config", .{
         .root_source_file = b.path("src/config/root.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "transport", .module = transport_mod },
+            .{ .name = "parser", .module = parser_mod },
+        },
     });
+
+    // ── 业务 handler 实现（依赖 app_config 拿类型签名）──
+    const handlers_mod = b.addModule("handlers", .{
+        .root_source_file = b.path("src/handlers/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "app_config", .module = app_config_mod },
+        },
+    });
+
     const pc_server_mod = b.addModule("pc_server", .{
         .root_source_file = b.path("src/pc/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "app_config", .module = app_config_mod },
+            .{ .name = "transport", .module = transport_mod },
+            .{ .name = "parser", .module = parser_mod },
         },
     });
 
@@ -26,15 +70,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "app_config", .module = app_config_mod },
-        },
-    });
-
-    const parser_mod = b.addModule("parser", .{
-        .root_source_file = b.path("src/parser/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "app_config", .module = app_config_mod },
+            .{ .name = "transport", .module = transport_mod },
+            .{ .name = "parser", .module = parser_mod },
         },
     });
 
@@ -53,12 +90,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "app_config", .module = app_config_mod },
+            .{ .name = "transport", .module = transport_mod },
             .{ .name = "websocket", .module = websocket.module("websocket") },
         },
     });
 
     // 应用组装模块（src/app.zig）：持有三个服务器，负责编排启动/停止。
-    // 测试/benchmark 也通过 `@import("app")` 访问其中的 config 重导出。
     const app_mod = b.addModule("app", .{
         .root_source_file = b.path("src/app.zig"),
         .target = target,
@@ -71,6 +108,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "util", .module = util_mod },
             .{ .name = "ws_server", .module = ws_server_mod },
             .{ .name = "websocket", .module = websocket.module("websocket") },
+            .{ .name = "codec", .module = codec_mod },
+            .{ .name = "transport", .module = transport_mod },
+            .{ .name = "handlers", .module = handlers_mod },
         },
     });
 
@@ -105,7 +145,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
 
     // ── Integration test executable (zig build integ) ──
-    // Requires the server to be running (start with `zig build run`).
     const integ_exe_mod = b.createModule(.{
         .root_source_file = b.path("src/test/integration_test_main.zig"),
         .target = target,
@@ -117,6 +156,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "pc_server", .module = pc_server_mod },
             .{ .name = "hw_server", .module = hw_server },
             .{ .name = "parser", .module = parser_mod },
+            .{ .name = "codec", .module = codec_mod },
         },
     });
 
@@ -140,6 +180,7 @@ pub fn build(b: *std.Build) void {
     bench_mod.addImport("pc_server", pc_server_mod);
     bench_mod.addImport("hw_server", hw_server);
     bench_mod.addImport("parser", parser_mod);
+    bench_mod.addImport("codec", codec_mod);
 
     const bench_exe = b.addExecutable(.{
         .name = "benchmark",

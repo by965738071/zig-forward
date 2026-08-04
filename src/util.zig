@@ -24,35 +24,55 @@ pub const ParsedConfig = struct {
 
 // ── 全局关闭标志（信号处理器中设置，主循环中检查）──
 var g_shutdown = std.atomic.Value(bool).init(false);
+/// 信号计数：第一次 Ctrl+C 请求优雅关闭，第二次强制退出。
+/// 优雅关闭若卡住（如 WS listen 不响应 cancel），用户可再按 Ctrl+C 立即退出。
+var g_signal_count = std.atomic.Value(u32).init(0);
 
-/// 注册 Ctrl+C / SIGTERM 处理：收到信号时置位关闭标志。
-/// 主循环通过 `shutdownRequested()` 轮询。
+/// 注册 Ctrl+C / SIGTERM 处理：
+/// - 第一次：置位关闭标志，主循环检测后走优雅关闭。
+/// - 第二次：直接 _exit(130)，避免优雅关闭卡住时终端无响应。
 pub fn setupShutdownHandler() void {
     if (builtin.os.tag == .windows) {
-        // Windows 用 SetConsoleCtrlHandler 捕获 Ctrl+C
         const HandlerRoutine = *const fn (dwCtrlType: u32) callconv(.c) std.os.windows.BOOL;
 
         const handler: HandlerRoutine = struct {
             fn ctrlHandler(dwCtrlType: u32) callconv(.c) std.os.windows.BOOL {
                 if (dwCtrlType == 0) { // CTRL_C_EVENT
-                    g_shutdown.store(true, .monotonic);
+                    const count = g_signal_count.fetchAdd(1, .monotonic);
+                    if (count == 0) {
+                        g_shutdown.store(true, .monotonic);
+                    } else {
+                        // 第二次 Ctrl+C：强制退出
+                        std.process.exit(130);
+                    }
                     return @fromBackingInt(@intCast(1));
                 }
                 return @fromBackingInt(@intCast(0));
             }
         }.ctrlHandler;
 
-        // SetConsoleCtrlHandler 在 Zig 的 kernel32 绑定中可能不存在，使用 extern
         const SetConsoleCtrlHandler = @extern(*const fn (h: HandlerRoutine, add: c_int) callconv(.c) std.os.windows.BOOL, .{ .name = "SetConsoleCtrlHandler" });
         _ = SetConsoleCtrlHandler(handler, 1);
     } else {
-        // POSIX 用 sigaction 捕获 SIGINT/SIGTERM
         const posix = std.posix;
 
         const Handler = struct {
             fn handler(sig: posix.SIG) callconv(.c) void {
                 _ = sig;
-                g_shutdown.store(true, .monotonic);
+                const count = g_signal_count.fetchAdd(1, .monotonic);
+                if (count == 0) {
+                    // 第一次：请求优雅关闭。
+                    g_shutdown.store(true, .monotonic);
+                } else {
+                    // 第二次 Ctrl+C：用裸 _exit 跳过所有清理（信号上下文不安全）。
+                    // std.process.exit 会走 defer/flush，在 signal handler 中可能死锁。
+                    if (builtin.os.tag == .windows) {
+                        std.os.windows.ExitProcess(130);
+                    } else {
+                        // POSIX _exit：直接系统调用，不刷新 stdio/不走 defer。
+                        std.c._exit(130);
+                    }
+                }
             }
         };
 

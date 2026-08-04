@@ -1,7 +1,7 @@
 const std = @import("std");
 const ws = @import("websocket");
 const GlobalState = @import("app_config").state.GlobalState;
-const AClient = @import("app_config").state.AClient;
+const WsConn = @import("transport").ws_client.WsConn;
 
 /// WebSocket 应用上下文，传递给每个 Handler
 pub const App = struct {
@@ -19,8 +19,6 @@ pub const App = struct {
         };
     }
 
-    /// 停止 WebSocket 服务器（仅发信号，不销毁资源）。
-    /// 销毁由 deinit() 在 await() 之后执行。
     pub fn stop(self: *App) void {
         if (self.ws_server) |s| {
             s.stop();
@@ -37,46 +35,7 @@ pub const App = struct {
 };
 
 // ════════════════════════════════════════════════════════════════════
-//  WebSocket 传输层实现（AClient 接口）
-// ════════════════════════════════════════════════════════════════════
-
-/// WebSocket 客户端的 AClient 实现。
-/// 由 Handler 创建并拥有，通过 `&state.client` 注册到 Group.a_clients。
-pub const WsClientState = struct {
-    conn: *ws.Conn,
-    allocator: std.mem.Allocator,
-    pc_id: []const u8,
-    client: AClient,
-
-    pub fn init(self: *WsClientState, conn: *ws.Conn, allocator: std.mem.Allocator, pc_id: []const u8) void {
-        self.* = .{
-            .conn = conn,
-            .allocator = allocator,
-            .pc_id = pc_id,
-            .client = .{ .ptr = self, .vtable = &ws_vtable },
-        };
-    }
-
-    fn wsSend(ptr: *anyopaque, io: std.Io, data: []const u8) !void {
-        _ = io;
-        const self: *WsClientState = @ptrCast(@alignCast(ptr));
-        try self.conn.writeText(data);
-    }
-
-    fn wsClose(ptr: *anyopaque, io: std.Io) void {
-        _ = ptr;
-        _ = io;
-        // WS 连接生命周期由 websocket 库管理，无需额外操作
-    }
-
-    const ws_vtable = AClient.VTable{
-        .send = wsSend,
-        .close = wsClose,
-    };
-};
-
-// ════════════════════════════════════════════════════════════════════
-//  WebSocket 连接 Handler（公开，因为 ws.Server(Handler) 需要类型可见）
+//  WebSocket 连接 Handler
 // ════════════════════════════════════════════════════════════════════
 
 /// 单个 WebSocket 连接的 Handler
@@ -87,23 +46,23 @@ pub const Handler = struct {
     /// 该连接注册的 HW 地址列表（用于在 clientClose 时统一清理）
     registered_hw: std.StringHashMap(void) = undefined,
     /// WebSocket 传输层状态（嵌入 AClient，注册到 Group.a_clients）
-    ws_state: *WsClientState,
+    ws_conn: *WsConn,
 
     pub fn init(h: *ws.Handshake, conn: *ws.Conn, app: *App) !Handler {
         _ = h;
         const pc_id = try std.fmt.allocPrint(app.allocator, "ws:{*}", .{conn});
         errdefer app.allocator.free(pc_id);
 
-        const ws_state = try app.allocator.create(WsClientState);
-        errdefer app.allocator.destroy(ws_state);
-        ws_state.init(conn, app.allocator, pc_id);
+        const ws_conn = try app.allocator.create(WsConn);
+        errdefer app.allocator.destroy(ws_conn);
+        ws_conn.init(conn, app.allocator, pc_id);
 
         return .{
             .app = app,
             .conn = conn,
             .pc_id = pc_id,
             .registered_hw = std.StringHashMap(void).init(app.allocator),
-            .ws_state = ws_state,
+            .ws_conn = ws_conn,
         };
     }
 
@@ -115,7 +74,7 @@ pub const Handler = struct {
             self.app.allocator.free(entry.key_ptr.*);
         }
         self.registered_hw.deinit();
-        self.app.allocator.destroy(self.ws_state);
+        self.app.allocator.destroy(self.ws_conn);
         self.app.allocator.free(self.pc_id);
     }
 
@@ -161,8 +120,7 @@ pub const Handler = struct {
         const addr = try self.app.allocator.dupe(u8, target_addr.string);
         errdefer self.app.allocator.free(addr);
 
-        // 通过 AClient 接口注册到 Group.a_clients，HW 的广播会通过 wsSend 推送过来
-        try self.app.state.addAClient(self.app.io, addr, self.pc_id, &self.ws_state.client);
+        try self.app.state.addAClient(self.app.io, addr, self.pc_id, &self.ws_conn.client);
         try self.registered_hw.put(addr, {});
 
         try self.conn.writeText("{\"clazz\":\"Register\",\"status\":\"ok\"}");
@@ -233,7 +191,12 @@ pub const Handler = struct {
             return;
         };
 
-        self.app.state.releaseControl(self.app.io, target_addr.string);
+        self.app.state.releaseControl(self.app.io, target_addr.string) catch |err| {
+            const msg = std.fmt.allocPrint(self.app.allocator, "{{\"clazz\":\"ReleaseControl\",\"status\":\"error\",\"msg\":\"{s}\"}}", .{@errorName(err)}) catch unreachable;
+            defer self.app.allocator.free(msg);
+            try self.conn.writeText(msg);
+            return;
+        };
         try self.conn.writeText("{\"clazz\":\"ReleaseControl\",\"status\":\"ok\"}");
     }
 
@@ -267,7 +230,6 @@ pub const Handler = struct {
 };
 
 /// 启动 WebSocket 服务器（阻塞调用，需放在 Io.async 中运行）。
-/// 服务器实例存储在 app.ws_server 中，可通过 app.stop() 停止。
 pub fn startWithApp(app: *App, host: []const u8, port: u16) !void {
     const server = try app.allocator.create(ws.Server(Handler));
     errdefer app.allocator.destroy(server);

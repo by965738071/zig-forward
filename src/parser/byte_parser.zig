@@ -1,279 +1,252 @@
 const std = @import("std");
+const Frame = @import("frame.zig").Frame;
+const FrameReader = @import("frame_reader.zig").FrameReader;
+const Parser = @import("interface.zig").Parser;
+const codec = @import("codec");
 
-/// 二进制协议 Parser，用于 HwServer。
+/// 二进制协议 Parser，用于 PC（上位机）连接。
 ///
-/// 帧格式：
-///   [55 AA] [type:1] [length:4 LE] [payload:N] [checksum:2]
+/// 帧格式（与 `codec/codec.zig` 的编码严格一致）：
+///   [55 AA] [type:1] [length:4 LE] [payload:N] [checksum:2 LE]
 ///
-/// checksum：累加和（所有之前字节的 wrapping sum）
-pub fn ByteParser() type {
-    return struct {
-        pub const Frame = struct {
-            id: u8,
-            addrs: []const []const u8,
-            data: []const u8,
-            allocator: std.mem.Allocator,
+/// 实现 `Parser` 接口（vtable），可被 `PcServer` 以运行时方式持有。
+/// 新增协议只需照此实现 vtable + `create` 工厂。
+pub const MAGIC: [2]u8 = .{ 0x55, 0xAA };
+pub const HEADER_LEN = codec.HEADER_LEN;
+pub const MAX_PAYLOAD_LEN = codec.MAX_PAYLOAD_LEN;
+pub const MAX_FRAME_LEN = HEADER_LEN + MAX_PAYLOAD_LEN;
 
-            pub fn deinit(self: *@This()) void {
-                for (self.addrs) |a| self.allocator.free(a);
-                self.allocator.free(self.addrs);
-                self.allocator.free(self.data);
-            }
-        };
+pub const ByteParser = struct {
+    allocator: std.mem.Allocator,
+    fr: FrameReader = .{},
 
-        allocator: std.mem.Allocator,
-        buf: std.ArrayList(u8),
-        read_buf: [4096]u8 = undefined,
-
-        const Self = @This();
-
-        pub fn init(allocator: std.mem.Allocator) Self {
-            return .{ .allocator = allocator, .buf = .empty };
-        }
-
-        pub fn deinit(self: *Self) void {
-            self.buf.deinit(self.allocator);
-        }
-
-        /// 从硬件流读取数据并解析出一个完整帧。
-        /// 返回 `null` 表示 EOF（连接关闭）。
-        pub fn parse(self: *Self, reader: *std.Io.Reader, allocator: std.mem.Allocator) !?Frame {
-            while (true) {
-                if (try self.tryExtractFrame(allocator)) |frame| return frame;
-
-                // 需要更多数据
-                var iov: [1][]u8 = .{self.read_buf[0..]};
-                const n = reader.readVec(&iov) catch |err| switch (err) {
-                    error.EndOfStream => return null,
-                    else => |e| return e,
-                };
-                if (n == 0) return null; // EOF
-                try self.buf.appendSlice(allocator, self.read_buf[0..n]);
-            }
-        }
-
-        /// 尝试从缓冲区提取一个完整帧。返回 null 表示数据不足。
-        fn tryExtractFrame(self: *Self, allocator: std.mem.Allocator) !?Frame {
-            // 循环扫描：checksum 失败或帧前存在垃圾字节时，丢弃头部字节后重试，
-            // 用循环而非递归，避免损坏/恶意流触发 O(n²) 或深层递归。
-            while (true) {
-                const data = self.buf.items;
-                if (data.len < 2) return null;
-
-                const header_pos = findHeader(data) orelse {
-                    // 没找到 55AA，清空缓冲区（保留最后一个字节 0x55 以防跨边界）
-                    if (data.len > 0 and data[data.len - 1] == 0x55) {
-                        self.buf.items[0] = 0x55;
-                        self.buf.shrinkRetainingCapacity(1);
-                    } else {
-                        self.buf.clearRetainingCapacity();
-                    }
-                    return null;
-                };
-
-                // 丢弃 header 前的垃圾字节
-                if (header_pos > 0) {
-                    std.mem.copyForwards(u8, data[0 .. data.len - header_pos], data[header_pos..]);
-                    self.buf.shrinkRetainingCapacity(data.len - header_pos);
-                }
-
-                // 最少需要：header(2) + type(1) + length(4) + checksum(2) = 9
-                if (self.buf.items.len < 9) return null;
-
-                const packet_type = self.buf.items[2];
-                const payload_len = std.mem.readInt(u32, @as(*const [4]u8, @ptrCast(self.buf.items.ptr + 3)), .little);
-                const total_len = 2 + 1 + 4 + payload_len + 2; // header + type + len + payload + checksum
-
-                if (self.buf.items.len < total_len) return null;
-
-                // 校验 checksum（累加和，wrapping）
-                var sum: u16 = 0;
-                for (self.buf.items[0 .. total_len - 2]) |b| {
-                    sum +%= b;
-                }
-                const checksum = std.mem.readInt(u16, @as(*const [2]u8, @ptrCast(self.buf.items.ptr + total_len - 2)), .little);
-                if (sum != checksum) {
-                    // checksum 不匹配：跳过第一个字节，回到帧边界重新搜索。
-                    _ = self.buf.orderedRemove(0);
-                    continue;
-                }
-
-                // 提取 addrs（payload 中以空字符分隔的多个地址）
-                const payload_start = 2 + 1 + 4; // header + type + length
-                const payload = self.buf.items[payload_start .. payload_start + payload_len];
-
-                var addrs_list = std.ArrayList([]const u8).empty;
-                defer addrs_list.deinit(allocator);
-                {
-                    var offset: usize = 0;
-                    while (offset < payload.len and payload[offset] != 0) {
-                        const end = std.mem.indexOfScalar(u8, payload[offset..], 0) orelse payload.len;
-                        try addrs_list.append(allocator, try allocator.dupe(u8, payload[offset..end]));
-                        offset = end + 1;
-                    }
-                }
-                const addrs = try addrs_list.toOwnedSlice(allocator);
-
-                // data = 完整包数据
-                const packet = try allocator.dupe(u8, self.buf.items[0..total_len]);
-
-                // 移除已消耗的字节
-                if (self.buf.items.len > total_len) {
-                    std.mem.copyForwards(u8, self.buf.items[0 .. self.buf.items.len - total_len], self.buf.items[total_len..]);
-                }
-                self.buf.shrinkRetainingCapacity(self.buf.items.len - total_len);
-
-                return Frame{ .id = packet_type, .addrs = addrs, .data = packet, .allocator = allocator };
-            }
-        }
-    };
-}
-
-/// 在数据中搜索 55AA 包头
-fn findHeader(data: []const u8) ?usize {
-    if (data.len < 2) return null;
-    var i: usize = 0;
-    while (i < data.len - 1) : (i += 1) {
-        if (data[i] == 0x55 and data[i + 1] == 0xAA) return i;
+    pub fn create(allocator: std.mem.Allocator) !*Parser {
+        const self = try allocator.create(ByteParser);
+        self.* = .{ .allocator = allocator };
+        const parser = try allocator.create(Parser);
+        parser.* = .{ .ptr = self, .vtable = &vtable };
+        return parser;
     }
-    return null;
-}
+
+    fn parseImpl(ptr: *anyopaque, reader: *std.Io.Reader, allocator: std.mem.Allocator) anyerror!?Frame {
+        const self: *ByteParser = @ptrCast(@alignCast(ptr));
+        while (true) {
+            if (!try self.fr.readUntilMagic(reader, allocator, &MAGIC, MAX_FRAME_LEN)) return null;
+
+            if (!try self.fr.ensure(reader, allocator, HEADER_LEN, MAX_FRAME_LEN)) return null;
+            const head = self.fr.peek(HEADER_LEN);
+
+            const payload_len: usize = @intCast(std.mem.readInt(u32, head[3..7], .little));
+            if (payload_len > MAX_PAYLOAD_LEN) return error.FrameTooLarge;
+
+            const total_len = HEADER_LEN + payload_len;
+            if (!try self.fr.ensure(reader, allocator, total_len, MAX_FRAME_LEN)) return null;
+            const frame_bytes = self.fr.peek(total_len);
+
+            var sum: u16 = 0;
+            for (frame_bytes[0 .. total_len - 2]) |b| sum +%= b;
+            const checksum = std.mem.readInt(u16, frame_bytes[total_len - 2 ..][0..2], .little);
+            if (sum != checksum) {
+                self.fr.consume(1);
+                continue;
+            }
+
+            const payload = frame_bytes[7 .. 7 + payload_len];
+            self.fr.consume(total_len);
+
+            return Frame{
+                .id = .{ .int = frame_bytes[2] },
+                .raw = frame_bytes,
+                .payload = payload,
+            };
+        }
+    }
+
+    fn deinitImpl(ptr: *anyopaque) void {
+        const self: *ByteParser = @ptrCast(@alignCast(ptr));
+        self.fr.deinit(self.allocator);
+        self.allocator.destroy(self);
+    }
+
+    const vtable = Parser.VTable{
+        .parse = parseImpl,
+        .deinit = deinitImpl,
+    };
+};
 
 const testing = std.testing;
 
-/// Helper to create a ByteParser instance for testing.
-fn createParser(alloc: std.mem.Allocator) ByteParser() {
-    return ByteParser().init(alloc);
+fn createByteParser(alloc: std.mem.Allocator) !*Parser {
+    return ByteParser.create(alloc);
 }
 
-const ParserType = ByteParser();
-
-test "byte_parser findHeader" {
-    // Basic: header at start
-    try testing.expectEqual(@as(?usize, 0), findHeader(&.{ 0x55, 0xAA, 0x01 }));
-    // Header at offset 3
-    try testing.expectEqual(@as(?usize, 3), findHeader(&.{ 0x00, 0x01, 0x02, 0x55, 0xAA, 0x03 }));
-    // No header
-    try testing.expectEqual(@as(?usize, null), findHeader(&.{ 0x55, 0x01, 0xAA, 0x02 }));
-    // Too short
-    try testing.expectEqual(@as(?usize, null), findHeader(&.{0x55}));
-    // Empty
-    try testing.expectEqual(@as(?usize, null), findHeader(&.{}));
-    // Trailing 0x55 (partial header at end)
-    try testing.expectEqual(@as(?usize, null), findHeader(&.{ 0x01, 0x02, 0x55 }));
+/// 测试辅助：直接创建 ByteParser 实例（绕过 Parser 接口），便于测试内部状态。
+fn createRaw(alloc: std.mem.Allocator) *ByteParser {
+    const self = alloc.create(ByteParser) catch unreachable;
+    self.* = .{ .allocator = alloc };
+    return self;
 }
 
-test "byte_parser tryExtractFrame valid" {
+test "byte_parser valid frame" {
     const alloc = testing.allocator;
-    var parser = createParser(alloc);
-    defer parser.deinit();
+    var parser = try createByteParser(alloc);
+    defer {
+        parser.deinit();
+        alloc.destroy(parser);
+    }
 
-    // Manually construct a valid frame: [55 AA] [type=1B] [len=3 LE] [payload=01 AA BB] [checksum=sum]
-    var frame_buf: [2 + 1 + 4 + 3 + 2]u8 = undefined;
-    frame_buf[0] = 0x55;
-    frame_buf[1] = 0xAA;
-    frame_buf[2] = 0x1B; // type
-    std.mem.writeInt(u32, frame_buf[3..7], 3, .little); // payload length = 3
-    frame_buf[7] = 0x01;
-    frame_buf[8] = 0xAA;
-    frame_buf[9] = 0xBB;
-    // Calculate checksum (wrapping sum of all bytes up to payload)
-    var sum: u16 = 0;
-    for (frame_buf[0..10]) |b| sum +%= b;
-    std.mem.writeInt(u16, frame_buf[10..12], sum, .little);
+    const frame_bytes = try codec.encode(alloc, 0x1B, "hello");
+    defer alloc.free(frame_bytes);
 
-    // Feed into parser buffer
-    parser.buf.appendSlice(alloc, &frame_buf) catch unreachable;
+    var reader = std.Io.Reader.fixed(frame_bytes);
+    const fv = (try parser.parse(&reader, alloc)).?;
 
-    const result = try parser.tryExtractFrame(alloc);
-    try testing.expect(result != null);
-    const frame = result.?;
-    defer frame.deinit();
-
-    try testing.expectEqual(@as(u8, 0x1B), frame.id);
-    // Payload [01 AA BB] has no null bytes → one address of 3 bytes
-    try testing.expectEqual(@as(usize, 1), frame.addrs.len);
-    try testing.expectEqual(@as(usize, 3), frame.addrs[0].len);
-    try testing.expectEqual(@as(usize, 12), frame.data.len);
+    try testing.expectEqual(@as(u64, 0x1B), fv.id.int);
+    try testing.expectEqualStrings("hello", fv.payload);
+    try testing.expectEqualSlices(u8, frame_bytes, fv.raw);
 }
 
-test "byte_parser tryExtractFrame partial data" {
+test "byte_parser partial frame then complete" {
     const alloc = testing.allocator;
-    var parser = createParser(alloc);
-    defer parser.deinit();
+    const raw_parser = createRaw(alloc);
+    defer {
+        raw_parser.fr.deinit(alloc);
+        alloc.destroy(raw_parser);
+    }
+    var parser = Parser{ .ptr = raw_parser, .vtable = &ByteParser.vtable };
 
-    // Feed only header + type (not enough for a full frame)
-    parser.buf.appendSlice(alloc, &.{ 0x55, 0xAA, 0x01 }) catch unreachable;
-    try testing.expectEqual(@as(?ParserType.Frame, null), try parser.tryExtractFrame(alloc));
+    var reader = std.Io.Reader.fixed(&.{ 0x55, 0xAA, 0x01 });
+    try testing.expect((try parser.parse(&reader, alloc)) == null);
 
-    // Now add the rest: length(4) + payload(3) + checksum(2)
-    var rest: [4 + 3 + 2]u8 = undefined;
-    std.mem.writeInt(u32, rest[0..4], 3, .little);
-    rest[4] = 0x01;
-    rest[5] = 0xAA;
-    rest[6] = 0xBB;
-    var sum: u16 = 0;
-    for ([_]u8{ 0x55, 0xAA, 0x01 }) |b| sum +%= b;
-    for (rest[0..7]) |b| sum +%= b;
-    std.mem.writeInt(u16, rest[7..9], sum, .little);
-    parser.buf.appendSlice(alloc, &rest) catch unreachable;
+    const frame_bytes = try codec.encode(alloc, 0x01, "hello");
+    defer alloc.free(frame_bytes);
+    try raw_parser.fr.injectForTest(alloc, frame_bytes[3..]);
 
-    const result = try parser.tryExtractFrame(alloc);
-    try testing.expect(result != null);
-    result.?.deinit();
+    var reader2 = std.Io.Reader.fixed(&.{});
+    const fv = (try parser.parse(&reader2, alloc)).?;
+    try testing.expectEqual(@as(u64, 0x01), fv.id.int);
+    try testing.expectEqualStrings("hello", fv.payload);
 }
 
-test "byte_parser tryExtractFrame garbage before header" {
+test "byte_parser garbage before header" {
     const alloc = testing.allocator;
-    var parser = createParser(alloc);
-    defer parser.deinit();
+    var parser = try createByteParser(alloc);
+    defer {
+        parser.deinit();
+        alloc.destroy(parser);
+    }
 
-    // Garbage + valid frame
-    const garbage = [_]u8{ 0x00, 0x01, 0x02, 0x55, 0xAA, 0x01 };
-    var frame_buf: [garbage.len + 4 + 3 + 2]u8 = undefined;
-    @memcpy(frame_buf[0..garbage.len], &garbage);
-    std.mem.writeInt(u32, frame_buf[garbage.len..][0..4], 3, .little);
-    frame_buf[garbage.len + 4] = 0x01;
-    frame_buf[garbage.len + 5] = 0xAA;
-    frame_buf[garbage.len + 6] = 0xBB;
-    var sum: u16 = 0;
-    for (frame_buf[0 .. frame_buf.len - 2]) |b| sum +%= b;
-    std.mem.writeInt(u16, frame_buf[frame_buf.len - 2 ..][0..2], sum, .little);
+    const frame_bytes = try codec.encode(alloc, 0x1B, "dev1");
+    defer alloc.free(frame_bytes);
 
-    parser.buf.appendSlice(alloc, &frame_buf) catch unreachable;
+    var buffer = std.ArrayList(u8).empty;
+    defer buffer.deinit(alloc);
+    try buffer.appendSlice(alloc, &.{ 0x00, 0x01, 0x02 });
+    try buffer.appendSlice(alloc, frame_bytes);
 
-    const result = try parser.tryExtractFrame(alloc);
-    try testing.expect(result != null);
-    result.?.deinit();
+    var reader = std.Io.Reader.fixed(buffer.items);
+    const fv = (try parser.parse(&reader, alloc)).?;
+    try testing.expectEqual(@as(u64, 0x1B), fv.id.int);
+    try testing.expectEqualStrings("dev1", fv.payload);
 }
 
-test "byte_parser tryExtractFrame checksum mismatch skips byte" {
+test "byte_parser checksum mismatch returns null" {
     const alloc = testing.allocator;
-    var parser = createParser(alloc);
-    defer parser.deinit();
+    var parser = try createByteParser(alloc);
+    defer {
+        parser.deinit();
+        alloc.destroy(parser);
+    }
 
-    // Corrupt frame: bad checksum byte
-    var frame_buf: [2 + 1 + 4 + 1 + 2]u8 = undefined;
-    frame_buf[0] = 0x55;
-    frame_buf[1] = 0xAA;
-    frame_buf[2] = 0x01;
-    std.mem.writeInt(u32, frame_buf[3..7], 1, .little);
-    frame_buf[7] = 0x42;
-    std.mem.writeInt(u16, frame_buf[8..10], 0xFFFF, .little); // bad checksum
+    var bad: [HEADER_LEN + 1]u8 = undefined;
+    bad[0] = 0x55;
+    bad[1] = 0xAA;
+    bad[2] = 0x01;
+    std.mem.writeInt(u32, bad[3..7], 1, .little);
+    bad[7] = 0x42;
+    std.mem.writeInt(u16, bad[8..10], 0xFFFF, .little);
 
-    parser.buf.appendSlice(alloc, &frame_buf) catch unreachable;
-
-    // Should not return a frame (checksum fails, byte skipped, still no valid frame)
-    const result = try parser.tryExtractFrame(alloc);
-    try testing.expect(result == null);
-    // But the buffer should have been consumed (first byte skipped)
-    try testing.expect(parser.buf.items.len < frame_buf.len);
+    var reader = std.Io.Reader.fixed(&bad);
+    try testing.expect((try parser.parse(&reader, alloc)) == null);
 }
 
-test "byte_parser tryExtractFrame empty buffer" {
+test "byte_parser empty buffer eof" {
     const alloc = testing.allocator;
-    var parser = createParser(alloc);
-    defer parser.deinit();
+    var parser = try createByteParser(alloc);
+    defer {
+        parser.deinit();
+        alloc.destroy(parser);
+    }
 
-    try testing.expectEqual(@as(?ParserType.Frame, null), try parser.tryExtractFrame(alloc));
+    var reader = std.Io.Reader.fixed(&.{});
+    try testing.expect((try parser.parse(&reader, alloc)) == null);
+}
+
+test "byte_parser two frames back to back" {
+    const alloc = testing.allocator;
+    var parser = try createByteParser(alloc);
+    defer {
+        parser.deinit();
+        alloc.destroy(parser);
+    }
+
+    const f1 = try codec.encode(alloc, 0x01, "a");
+    defer alloc.free(f1);
+    const f2 = try codec.encode(alloc, 0x02, "bb");
+    defer alloc.free(f2);
+
+    var buffer = std.ArrayList(u8).empty;
+    defer buffer.deinit(alloc);
+    try buffer.appendSlice(alloc, f1);
+    try buffer.appendSlice(alloc, f2);
+
+    var reader = std.Io.Reader.fixed(buffer.items);
+    const fv1 = (try parser.parse(&reader, alloc)).?;
+    try testing.expectEqual(@as(u64, 0x01), fv1.id.int);
+
+    const fv2 = (try parser.parse(&reader, alloc)).?;
+    try testing.expectEqual(@as(u64, 0x02), fv2.id.int);
+
+    try testing.expect((try parser.parse(&reader, alloc)) == null);
+}
+
+test "byte_parser payload too large returns FrameTooLarge" {
+    const alloc = testing.allocator;
+    var parser = try createByteParser(alloc);
+    defer {
+        parser.deinit();
+        alloc.destroy(parser);
+    }
+
+    var head: [HEADER_LEN]u8 = undefined;
+    head[0] = 0x55;
+    head[1] = 0xAA;
+    head[2] = 0x01;
+    std.mem.writeInt(u32, head[3..7], @as(u32, @intCast(MAX_PAYLOAD_LEN + 1)), .little);
+    std.mem.writeInt(u16, head[7..9], 0, .little);
+
+    var reader = std.Io.Reader.fixed(&head);
+    try testing.expectError(error.FrameTooLarge, parser.parse(&reader, alloc));
+}
+
+test "byte_parser Frame dup" {
+    const alloc = testing.allocator;
+    var parser = try createByteParser(alloc);
+    defer {
+        parser.deinit();
+        alloc.destroy(parser);
+    }
+
+    const frame_bytes = try codec.encode(alloc, 0x1B, "world");
+    defer alloc.free(frame_bytes);
+
+    var reader = std.Io.Reader.fixed(frame_bytes);
+    const fv = (try parser.parse(&reader, alloc)).?;
+    var owned = try fv.dup(alloc);
+    defer owned.deinit(alloc);
+
+    try testing.expect((try parser.parse(&reader, alloc)) == null);
+    try testing.expectEqual(@as(u64, 0x1B), owned.id.int);
+    try testing.expectEqualStrings("world", owned.payload);
+    try testing.expectEqualSlices(u8, frame_bytes, owned.raw);
 }

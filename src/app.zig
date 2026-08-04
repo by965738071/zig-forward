@@ -10,66 +10,68 @@ const ByteParser = @import("parser").byte_parser.ByteParser;
 const JsonLineParser = @import("parser").json_parser.JsonLineParser;
 const ws_server = @import("ws_server");
 const util = @import("util");
+const handlers = @import("handlers");
 
-// 暴露 config 模块（config/root.zig）给测试/benchmark：通过 `@import("app").config.*` 访问。
+// 暴露 config 模块（config/root.zig）给测试/benchmark
 pub const config = cfg;
 
-/// 应用组装：持有三个服务器 + 共享状态，负责启动 / 停止 / 等待关闭。
-/// main.zig 只负责：解析 CLI → 构造 App → run()。
+/// 应用组装：持有三个服务器 + 共享状态。
+/// Server 均为非泛型，parser 通过 factory 注入——新增协议只需提供新 Factory。
 pub const App = struct {
     allocator: std.mem.Allocator,
     io: Io,
-    /// 运行时配置（含命令路由表）。切片数据由 main 的 runtime_config 持有，
-    /// 生命周期覆盖整个 App（main 的 defer 顺序保证 config 后释放）。
     config: ConfigType,
     state: GlobalState,
-    pc_server: PcServer(u8, ByteParser()),
-    hw_server: HwServer([]const u8, JsonLineParser([]const u8)),
+    pc_server: PcServer,
+    hw_server: HwServer,
     ws_app: ws_server.App,
 
-    pub fn init(self: *App, allocator: std.mem.Allocator, io: Io, cfg_ptr: *const ConfigType) !void {
-        self.allocator = allocator;
-        self.io = io;
-        self.config = cfg_ptr.*;
+    pub fn create(allocator: std.mem.Allocator, io: Io, cfg_value: ConfigType) !*App {
+        const self = try allocator.create(App);
+        errdefer allocator.destroy(self);
 
-        self.state = GlobalState.init(allocator);
-        errdefer self.state.deinit();
+        self.* = .{
+            .allocator = allocator,
+            .io = io,
+            .config = cfg_value,
+            .state = GlobalState.init(allocator),
+            .pc_server = PcServer.init(allocator, &self.state, io, cfg_value, ByteParser.create),
+            .hw_server = HwServer.init(allocator, &self.state, io, cfg_value.hw.host, cfg_value.hw.port, JsonLineParser.create),
+            .ws_app = ws_server.App.init(allocator, io, &self.state),
+        };
+        errdefer self.deinitFields();
 
-        self.pc_server = PcServer(u8, ByteParser()).init(allocator, &self.state, io, self.config);
-        errdefer self.pc_server.deinit();
-        for (cfg_ptr.commands) |cmd| {
+        // 注册 PC 命令（业务 handler 来自 handlers 模块）
+        for (handlers.pc.commands) |cmd| {
             try self.pc_server.registerCommand(cmd.id, cmd.handler);
         }
-
-        self.hw_server = HwServer([]const u8, JsonLineParser([]const u8))
-            .init(allocator, &self.state, io, cfg_ptr.hw.host, cfg_ptr.hw.port);
-        errdefer self.hw_server.deinit();
-        for (cfg_ptr.hw_commands) |cmd| {
-            try self.hw_server.registerCommand(cmd.name, cmd.handler);
+        // 注册 HW 命令
+        for (handlers.hw.commands) |cmd| {
+            try self.hw_server.registerCommand(cmd.id, cmd.handler);
         }
-        if (cfg_ptr.hw_default_handler) |h| {
+        if (handlers.hw.default_handler) |h| {
             self.hw_server.setDefault(h);
         }
 
-        self.ws_app = ws_server.App.init(allocator, io, &self.state);
-        errdefer self.ws_app.deinit();
+        return self;
     }
 
-    pub fn deinit(self: *App) void {
+    fn deinitFields(self: *App) void {
         self.ws_app.deinit();
         self.hw_server.deinit();
         self.pc_server.deinit();
         self.state.deinit();
     }
 
-    /// 启动三个服务器并阻塞等待关闭信号（Ctrl+C / SIGTERM）。
-    /// 收到信号后通过 Io.Group.cancel() 优雅关闭所有服务器协程。
+    pub fn deinit(self: *App) void {
+        self.deinitFields();
+        self.allocator.destroy(self);
+    }
+
     pub fn run(self: *App) void {
         const rc = &self.config;
         std.log.info("Zig Forward starting — PC:{s}:{d}  HW:{s}:{d}  WS:{s}:{d}", .{ rc.pc.host, rc.pc.port, rc.hw.host, rc.hw.port, rc.ws.host, rc.ws.port });
 
-        // ── 使用 Io.Group 管理三个服务器协程 ──
-        // Group.cancel() 通过 Io vtable 的 alertable 路径取消 pending 的 accept()
         var group: std.Io.Group = .init;
 
         group.async(self.io, struct {
@@ -96,25 +98,29 @@ pub const App = struct {
             }
         }.run, .{self});
 
-        // ── 等待关闭信号 ──
         std.log.info("Server started. Press Ctrl+C to stop.", .{});
         while (!util.shutdownRequested()) {
-            Io.sleep(self.io, .{ .nanoseconds = 200_000_000 }, .real) catch {};
+            // 50ms 轮询间隔——信号 handler 只置位标志不中断 sleep，
+            // 短间隔保证 Ctrl+C 后最多 50ms 即进入关闭路径。
+            Io.sleep(self.io, .{ .nanoseconds = 50_000_000 }, .real) catch {};
         }
 
-        // ── 优雅关闭 ──
         std.log.info("Shutting down...", .{});
-        // WS 服务器使用原始 posix.accept（不走 Io vtable），需要先显式 stop()
         self.ws_app.stop();
-        // 取消 accept 循环（PC/HW 服务器通过 Io vtable 的 alertable 路径取消）
         group.cancel(self.io);
 
-        // 取消所有 handler 协程（Group.cancel 会发送取消信号并等待所有任务完成）
         self.pc_server.handler_group.cancel(self.io);
         self.hw_server.handler_group.cancel(self.io);
-        std.log.info("所有 handler 已退出", .{});
 
-        // 安全网：清理任何残留的组状态
+        // 等待所有协程实际退出，避免端口/连接在进程退出前仍未释放。
+        // group.cancel 是异步的（发信号不等待），若无 await，run() 返回后
+        // main 退出、进程被 OS 回收——正常情况可行，但若某协程卡在不可取消
+        // 的阻塞点（如第三方 websocket listen），会导致端口残留。
+        group.await(self.io) catch {};
+        self.pc_server.handler_group.await(self.io) catch {};
+        self.hw_server.handler_group.await(self.io) catch {};
+        std.log.info("all handler exit", .{});
+
         self.state.closeAllGroups(self.io);
     }
 };

@@ -29,7 +29,8 @@ test "pc register fails when hw not connected" {
     // 启动 PC 服务器
     const thread = try std.Thread.spawn(.{}, struct {
         fn run(alloc2: std.mem.Allocator, st: *GlobalState, i: Io, c: ConfigType) void {
-            var server = PcServer(u8, ByteParser()).init(alloc2, st, i, c);
+            var server = PcServer.init(alloc2, st, i, c, ByteParser.create);
+            defer server.deinit();
             server.start() catch |err| {
                 std.log.err("PC server: {}", .{err});
             };

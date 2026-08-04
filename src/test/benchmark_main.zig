@@ -4,7 +4,7 @@ const net = Io.net;
 const c = std.c;
 
 const app = @import("app");
-const custom_codec = app.config.custom_codec;
+const custom_codec = @import("codec").codec;
 
 pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
