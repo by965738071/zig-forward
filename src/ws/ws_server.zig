@@ -47,6 +47,8 @@ pub const Handler = struct {
     registered_hw: std.StringHashMap(void) = undefined,
     /// WebSocket 传输层状态（嵌入 AClient，注册到 Group.a_clients）
     ws_conn: *WsConn,
+    /// 防止 close 和 clientClose 双重释放
+    closed: bool = false,
 
     pub fn init(h: *ws.Handshake, conn: *ws.Conn, app: *App) !Handler {
         _ = h;
@@ -66,8 +68,9 @@ pub const Handler = struct {
         };
     }
 
-    pub fn clientClose(self: *Handler, data: []const u8) !void {
-        _ = data;
+    pub fn close(self: *Handler) void {
+        if (self.closed) return;
+        self.closed = true;
         var it = self.registered_hw.iterator();
         while (it.next()) |entry| {
             self.app.state.removeAClient(self.app.io, entry.key_ptr.*, self.pc_id) catch {};
@@ -76,6 +79,11 @@ pub const Handler = struct {
         self.registered_hw.deinit();
         self.app.allocator.destroy(self.ws_conn);
         self.app.allocator.free(self.pc_id);
+    }
+
+    pub fn clientClose(self: *Handler, data: []const u8) !void {
+        _ = data;
+        self.close();
     }
 
     pub fn clientMessage(self: *Handler, data: []const u8) !void {

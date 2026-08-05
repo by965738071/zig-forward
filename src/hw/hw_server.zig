@@ -60,14 +60,8 @@ pub const HwServer = struct {
         std.log.info("HW server listening on {s}:{d}", .{ self.host, self.port });
 
         while (true) {
-            const stream = self.listener.?.accept(self.io) catch |err| switch (err) {
-                error.Canceled => break,
-                else => {
-                    std.log.err("HW server accept failed: {}", .{err});
-                    return err;
-                },
-            };
-            std.log.info("HW device connected", .{});
+            const stream = try self.listener.?.accept(self.io);
+            std.log.info("HW device connected ip={f}", .{stream.socket.address});
 
             self.handler_group.concurrent(self.io, struct {
                 fn run(s: *Self, st: net.Stream) void {

@@ -12,7 +12,7 @@ const HandlerRegistry = @import("app_config").handler_registry.HandlerRegistry;
 const Config = @import("app_config").ConfigType;
 
 /// 向 writer 写入一行（追加 `\n` 并 flush）。
-fn writeLine(writer: anytype, msg: []const u8) !void {
+fn writeLine(writer: *std.Io.Writer, msg: []const u8) !void {
     try writer.writeAll(msg);
     try writer.writeByte('\n');
     try writer.flush();
@@ -75,13 +75,7 @@ pub const PcServer = struct {
         std.log.info("PC server listening on {s}:{d}", .{ self.config.pc.host, self.config.pc.port });
 
         while (true) {
-            const stream = self.listener.?.accept(self.io) catch |err| switch (err) {
-                error.Canceled => break,
-                else => {
-                    std.log.err("PC server accept failed: {}", .{err});
-                    return err;
-                },
-            };
+            const stream = try self.listener.?.accept(self.io);
             std.log.info("PC client connected ip ={f}", .{stream.socket.address});
 
             self.handler_group.concurrent(self.io, struct {

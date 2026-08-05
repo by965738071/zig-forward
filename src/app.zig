@@ -68,9 +68,9 @@ pub const App = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn run(self: *App) void {
+    pub fn run(self: *App) !void {
         const rc = &self.config;
-        std.log.info("Zig Forward starting — PC:{s}:{d}  HW:{s}:{d}  WS:{s}:{d}", .{ rc.pc.host, rc.pc.port, rc.hw.host, rc.hw.port, rc.ws.host, rc.ws.port });
+        std.log.info("Zig Forward starting: PC:{s}:{d}  HW:{s}:{d}  WS:{s}:{d}", .{ rc.pc.host, rc.pc.port, rc.hw.host, rc.hw.port, rc.ws.host, rc.ws.port });
 
         var group: std.Io.Group = .init;
 
@@ -99,11 +99,7 @@ pub const App = struct {
         }.run, .{self});
 
         std.log.info("Server started. Press Ctrl+C to stop.", .{});
-        while (!util.shutdownRequested()) {
-            // 50ms 轮询间隔——信号 handler 只置位标志不中断 sleep，
-            // 短间隔保证 Ctrl+C 后最多 50ms 即进入关闭路径。
-            Io.sleep(self.io, .{ .nanoseconds = 50_000_000 }, .real) catch {};
-        }
+        util.waitForShutdown(self.io);
 
         std.log.info("Shutting down...", .{});
         self.ws_app.stop();
@@ -116,11 +112,10 @@ pub const App = struct {
         // group.cancel 是异步的（发信号不等待），若无 await，run() 返回后
         // main 退出、进程被 OS 回收——正常情况可行，但若某协程卡在不可取消
         // 的阻塞点（如第三方 websocket listen），会导致端口残留。
-        group.await(self.io) catch {};
-        self.pc_server.handler_group.await(self.io) catch {};
-        self.hw_server.handler_group.await(self.io) catch {};
+        try group.await(self.io);
+        try self.pc_server.handler_group.await(self.io);
+        try self.hw_server.handler_group.await(self.io);
         std.log.info("all handler exit", .{});
-
-        self.state.closeAllGroups(self.io);
+        try self.state.closeAllGroups(self.io);
     }
 };

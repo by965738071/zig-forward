@@ -1,5 +1,6 @@
 const std = @import("std");
 const AClient = @import("tcp.zig").AClient;
+const ws = @import("websocket");
 
 /// WebSocket 客户端的 AClient 实现（仅 A 端，WS 不作为 C 端/HW 设备）。
 ///
@@ -36,5 +37,3 @@ pub const WsConn = struct {
         .close = wsClose,
     };
 };
-
-const ws = @import("websocket");

@@ -133,10 +133,7 @@ pub const FrameReader = struct {
         var iov: [1][]u8 = .{tmp[0..]};
         const n = reader.readVec(&iov) catch |err| switch (err) {
             error.EndOfStream => return false,
-            else => |e| {
-                std.log.warn("readMore: readVec error: {s}", .{@errorName(e)});
-                return e;
-            },
+            else => |e| return e,
         };
         if (n == 0) return false;
         try self.buf.appendSlice(allocator, tmp[0..n]);

@@ -270,15 +270,12 @@ pub const GlobalState = struct {
     }
 
     /// 关闭所有 HW 组（关机时调用，解阻塞所有 handler 线程）。
-    pub fn closeAllGroups(self: *GlobalState, io: Io) void {
-        self.mutex.lock(io) catch |err| {
-            std.log.warn("closeAllGroups: lock failed ({s})", .{@errorName(err)});
-            return;
-        };
+    pub fn closeAllGroups(self: *GlobalState, io: Io) !void {
+        try self.mutex.lock(io);
         var addrs: std.ArrayList([]const u8) = .empty;
         var it = self.groups.iterator();
         while (it.next()) |entry| {
-            addrs.append(self.allocator, entry.key_ptr.*) catch {};
+            try addrs.append(self.allocator, entry.key_ptr.*);
         }
         self.mutex.unlock(io);
         defer addrs.deinit(self.allocator);

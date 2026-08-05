@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const cfg = @import("app_config");
 const ConfigType = cfg.ConfigType;
-
+const log = std.log.scoped(.util);
 /// CLI 解析结果的包装体，跟踪哪些字段被覆写，方便释放。
 pub const ParsedConfig = struct {
     config: ConfigType,
@@ -25,13 +25,21 @@ pub const ParsedConfig = struct {
 // ── 全局关闭标志（信号处理器中设置，主循环中检查）──
 var g_shutdown = std.atomic.Value(bool).init(false);
 /// 信号计数：第一次 Ctrl+C 请求优雅关闭，第二次强制退出。
-/// 优雅关闭若卡住（如 WS listen 不响应 cancel），用户可再按 Ctrl+C 立即退出。
 var g_signal_count = std.atomic.Value(u32).init(0);
 
+/// 基于 futex 的事件对象，用于替代 sleep 轮询。
+/// 信号处理函数中调用 event.set(io) 唤醒主线程，主线程阻塞在 event.wait(io) 上。
+var g_shutdown_event: std.Io.Event = .unset;
+/// 全局 Io 引用，供信号处理函数调用 event.set()。
+var g_shutdown_io: std.Io = undefined;
+
 /// 注册 Ctrl+C / SIGTERM 处理：
-/// - 第一次：置位关闭标志，主循环检测后走优雅关闭。
+/// - 第一次：置位关闭标志，唤醒主线程走优雅关闭。
 /// - 第二次：直接 _exit(130)，避免优雅关闭卡住时终端无响应。
-pub fn setupShutdownHandler() void {
+///
+/// 需要传入 io 参数，供信号处理函数通过 Io.Event.set() 唤醒主线程。
+pub fn setupShutdownHandler(io: std.Io) void {
+    g_shutdown_io = io;
     if (builtin.os.tag == .windows) {
         const HandlerRoutine = *const fn (dwCtrlType: u32) callconv(.c) std.os.windows.BOOL;
 
@@ -41,6 +49,7 @@ pub fn setupShutdownHandler() void {
                     const count = g_signal_count.fetchAdd(1, .monotonic);
                     if (count == 0) {
                         g_shutdown.store(true, .monotonic);
+                        g_shutdown_event.set(g_shutdown_io);
                     } else {
                         // 第二次 Ctrl+C：强制退出
                         std.process.exit(130);
@@ -63,15 +72,12 @@ pub fn setupShutdownHandler() void {
                 if (count == 0) {
                     // 第一次：请求优雅关闭。
                     g_shutdown.store(true, .monotonic);
+                    // 唤醒主线程（futex/__ulock_wake 是系统调用，信号上下文安全）。
+                    g_shutdown_event.set(g_shutdown_io);
                 } else {
                     // 第二次 Ctrl+C：用裸 _exit 跳过所有清理（信号上下文不安全）。
                     // std.process.exit 会走 defer/flush，在 signal handler 中可能死锁。
-                    if (builtin.os.tag == .windows) {
-                        std.os.windows.ExitProcess(130);
-                    } else {
-                        // POSIX _exit：直接系统调用，不刷新 stdio/不走 defer。
-                        std.c._exit(130);
-                    }
+                    std.c._exit(130);
                 }
             }
         };
@@ -89,9 +95,10 @@ pub fn setupShutdownHandler() void {
     }
 }
 
-/// 是否已收到关闭信号（Ctrl+C / SIGTERM）
-pub fn shutdownRequested() bool {
-    return g_shutdown.load(.monotonic);
+/// 阻塞直到收到关闭信号（零轮询，基于 futex 的真正阻塞等待）。
+/// 信号处理函数中调用 g_shutdown_event.set(io) 唤醒此等待。
+pub fn waitForShutdown(io: std.Io) void {
+    g_shutdown_event.wait(io) catch {};
 }
 
 /// Parse CLI arguments and return a runtime config.
@@ -122,16 +129,16 @@ pub fn parseCliArgs(allocator: std.mem.Allocator, args: std.process.Args) !Parse
             printHelp();
             return error.HelpRequested;
         } else {
-            std.log.warn("Unknown argument: {s}", .{arg});
+            log.err("Unknown argument: {s}", .{arg});
             return error.UnknownArgument;
         }
     }
     return result;
 }
 
-pub fn printHelp() void {
+fn printHelp() void {
     std.debug.print(
-        "Zig Forward — TCP message broker\n" ++
+        "Zig Forward: TCP message broker\n" ++
             "\n" ++
             "USAGE: zig_forward [OPTIONS]\n" ++
             "\n" ++
