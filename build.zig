@@ -6,13 +6,6 @@ pub fn build(b: *std.Build) void {
 
     const websocket = b.dependency("websocket", .{});
 
-    // ── 编解码原语（无外部依赖，被 parser 和测试引用）──
-    const codec_mod = b.addModule("codec", .{
-        .root_source_file = b.path("src/codec/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
     // ── 传输层（依赖 Io + websocket，定义 AClient/CSender 接口及 TCP/WS 实现）──
     const transport_mod = b.addModule("transport", .{
         .root_source_file = b.path("src/transport/root.zig"),
@@ -27,9 +20,6 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/parser/root.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{
-            .{ .name = "codec", .module = codec_mod },
-        },
     });
 
     // ── 配置/状态层（依赖 transport 拿 AClient/CSender，依赖 parser 拿 Frame/Id）──
@@ -108,7 +98,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "util", .module = util_mod },
             .{ .name = "ws_server", .module = ws_server_mod },
             .{ .name = "websocket", .module = websocket.module("websocket") },
-            .{ .name = "codec", .module = codec_mod },
             .{ .name = "transport", .module = transport_mod },
             .{ .name = "handlers", .module = handlers_mod },
         },
@@ -156,7 +145,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "pc_server", .module = pc_server_mod },
             .{ .name = "hw_server", .module = hw_server },
             .{ .name = "parser", .module = parser_mod },
-            .{ .name = "codec", .module = codec_mod },
         },
     });
 
@@ -180,8 +168,6 @@ pub fn build(b: *std.Build) void {
     bench_mod.addImport("pc_server", pc_server_mod);
     bench_mod.addImport("hw_server", hw_server);
     bench_mod.addImport("parser", parser_mod);
-    bench_mod.addImport("codec", codec_mod);
-
     const bench_exe = b.addExecutable(.{
         .name = "benchmark",
         .root_module = bench_mod,

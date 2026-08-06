@@ -2,18 +2,21 @@ const std = @import("std");
 const Frame = @import("frame.zig").Frame;
 const FrameReader = @import("frame_reader.zig").FrameReader;
 const Parser = @import("interface.zig").Parser;
-const codec = @import("codec");
 
-/// 二进制协议 Parser，用于 PC（上位机）连接。
+/// 二进制协议编解码。
 ///
-/// 帧格式（与 `codec/codec.zig` 的编码严格一致）：
+/// 帧格式：
 ///   [55 AA] [type:1] [length:4 LE] [payload:N] [checksum:2 LE]
 ///
-/// 实现 `Parser` 接口（vtable），可被 `PcServer` 以运行时方式持有。
-/// 新增协议只需照此实现 vtable + `create` 工厂。
+/// - Header: 固定 `0x55 0xAA`
+/// - Type: 包类型（1 字节）
+/// - Length: payload 长度，小端 u32（不含 header/type/length/checksum 自身）
+/// - Payload: 变长数据
+/// - Checksum: 从 header 开始到 payload 结束所有字节的 wrapping 累加和（u16 低 16 位）
 pub const MAGIC: [2]u8 = .{ 0x55, 0xAA };
-pub const HEADER_LEN = codec.HEADER_LEN;
-pub const MAX_PAYLOAD_LEN = codec.MAX_PAYLOAD_LEN;
+pub const HEADER: [2]u8 = .{ 0x55, 0xAA };
+pub const HEADER_LEN: usize = 2 + 1 + 4 + 2; // magic + type + length + checksum
+pub const MAX_PAYLOAD_LEN: usize = 1024 * 1024;
 pub const MAX_FRAME_LEN = HEADER_LEN + MAX_PAYLOAD_LEN;
 
 pub const ByteParser = struct {
@@ -74,6 +77,39 @@ pub const ByteParser = struct {
     };
 };
 
+/// 编码一帧完整数据包。
+/// `payload` 为业务载荷；调用方拥有返回的切片，需自行 `allocator.free`。
+pub fn encode(allocator: std.mem.Allocator, packet_type: u8, payload: []const u8) ![]u8 {
+    const total_len = HEADER_LEN + payload.len;
+    const out = try allocator.alloc(u8, total_len);
+
+    var off: usize = 0;
+    out[off..][0..HEADER.len].* = HEADER;
+    off += HEADER.len;
+    out[off] = packet_type;
+    off += 1;
+    std.mem.writeInt(u32, out[off..][0..4], @intCast(payload.len), .little);
+    off += 4;
+    @memcpy(out[off..][0..payload.len], payload);
+    off += payload.len;
+
+    // checksum：header + type + length + payload 的 wrapping 累加和
+    var sum: u16 = 0;
+    for (out[0..off]) |b| sum +%= b;
+    std.mem.writeInt(u16, out[off..][0..2], sum, .little);
+
+    return out;
+}
+
+/// 校验一帧（不含 header 匹配，调用方已完成）的 checksum 是否正确。
+pub fn verifyChecksum(frame: []const u8) bool {
+    if (frame.len < 2) return false;
+    var sum: u16 = 0;
+    for (frame[0 .. frame.len - 2]) |b| sum +%= b;
+    const checksum = std.mem.readInt(u16, frame[frame.len - 2 ..][0..2], .little);
+    return sum == checksum;
+}
+
 const testing = std.testing;
 
 fn createByteParser(alloc: std.mem.Allocator) !*Parser {
@@ -95,7 +131,7 @@ test "byte_parser valid frame" {
         alloc.destroy(parser);
     }
 
-    const frame_bytes = try codec.encode(alloc, 0x1B, "hello");
+    const frame_bytes = try encode(alloc, 0x1B, "hello");
     defer alloc.free(frame_bytes);
 
     var reader = std.Io.Reader.fixed(frame_bytes);
@@ -118,7 +154,7 @@ test "byte_parser partial frame then complete" {
     var reader = std.Io.Reader.fixed(&.{ 0x55, 0xAA, 0x01 });
     try testing.expect((try parser.parse(&reader, alloc)) == null);
 
-    const frame_bytes = try codec.encode(alloc, 0x01, "hello");
+    const frame_bytes = try encode(alloc, 0x01, "hello");
     defer alloc.free(frame_bytes);
     try raw_parser.fr.injectForTest(alloc, frame_bytes[3..]);
 
@@ -136,7 +172,7 @@ test "byte_parser garbage before header" {
         alloc.destroy(parser);
     }
 
-    const frame_bytes = try codec.encode(alloc, 0x1B, "dev1");
+    const frame_bytes = try encode(alloc, 0x1B, "dev1");
     defer alloc.free(frame_bytes);
 
     var buffer = std.ArrayList(u8).empty;
@@ -190,9 +226,9 @@ test "byte_parser two frames back to back" {
         alloc.destroy(parser);
     }
 
-    const f1 = try codec.encode(alloc, 0x01, "a");
+    const f1 = try encode(alloc, 0x01, "a");
     defer alloc.free(f1);
-    const f2 = try codec.encode(alloc, 0x02, "bb");
+    const f2 = try encode(alloc, 0x02, "bb");
     defer alloc.free(f2);
 
     var buffer = std.ArrayList(u8).empty;
@@ -237,7 +273,7 @@ test "byte_parser Frame dup" {
         alloc.destroy(parser);
     }
 
-    const frame_bytes = try codec.encode(alloc, 0x1B, "world");
+    const frame_bytes = try encode(alloc, 0x1B, "world");
     defer alloc.free(frame_bytes);
 
     var reader = std.Io.Reader.fixed(frame_bytes);

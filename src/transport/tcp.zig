@@ -21,12 +21,18 @@ pub const TcpConn = struct {
 
     /// 初始化嵌入的 AClient（传入 addAClient 时用 &self.client）
     pub fn initClient(self: *TcpConn) void {
-        self.client = .{ .ptr = self, .vtable = &a_client_vtable };
+        self.client = .{ .ptr = self, .vtable = &AClient.VTable{
+            .send = aClientSend,
+            .close = aClientClose,
+        } };
     }
 
     /// 初始化嵌入的 CSender（传入 setCSender 时用 &self.c_sender）
     pub fn initCSender(self: *TcpConn) void {
-        self.c_sender = .{ .ptr = self, .vtable = &c_sender_vtable };
+        self.c_sender = .{ .ptr = self, .vtable = &CSender.VTable{
+            .send = cSenderSend,
+            .close = cSenderClose,
+        } };
     }
 
     // ── AClient 实现：PC 客户端方向，发送时追加 '\n' 行分隔符 ──
@@ -48,11 +54,6 @@ pub const TcpConn = struct {
         self.stream.close(io);
     }
 
-    const a_client_vtable = AClient.VTable{
-        .send = aClientSend,
-        .close = aClientClose,
-    };
-
     // ── CSender 实现：HW 设备方向，发送原始字节（无分隔符）──
 
     fn cSenderSend(ptr: *anyopaque, io: Io, data: []const u8) !void {
@@ -70,11 +71,6 @@ pub const TcpConn = struct {
         self.stream_closed = true;
         self.stream.close(io);
     }
-
-    const c_sender_vtable = CSender.VTable{
-        .send = cSenderSend,
-        .close = cSenderClose,
-    };
 };
 
 // ════════════════════════════════════════════════════════════════════

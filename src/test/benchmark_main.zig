@@ -4,7 +4,7 @@ const net = Io.net;
 const c = std.c;
 
 const app = @import("app");
-const custom_codec = @import("codec").codec;
+const byte_parser = @import("parser").byte_parser;
 
 pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -215,7 +215,7 @@ fn pipelineBroadcastRaw(hw: *TcpClient, pcs: []const *TcpClient, json_line: []co
 
 /// Register a PC client using the binary protocol.
 fn registerPcBinary(pc: *TcpClient, hw_addr: []const u8, allocator: std.mem.Allocator, num: usize) !void {
-    const frame = try custom_codec.encode(allocator, 0x01, hw_addr);
+    const frame = try byte_parser.encode(allocator, 0x01, hw_addr);
     defer allocator.free(frame);
     try pc.writeAllRaw(frame);
     const resp = try pc.readLineRaw(allocator);

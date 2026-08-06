@@ -3,13 +3,13 @@ const Io = std.Io;
 const net = Io.net;
 const c = std.c;
 
-const custom_codec = @import("codec").codec;
+const byte_parser = @import("parser").byte_parser;
 
 /// Integration test — connects to an ALREADY RUNNING server.
 /// Fails fast (within 5s) if the server isn't running.
 ///
 /// Protocol:
-///   PC server (port 9000) — binary frames via custom_codec
+///   PC server (port 9000) — binary frames via byte_parser.encode
 ///   HW server (port 9001) — JSON lines via JsonLineParser
 pub fn main(init: std.process.Init) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -141,7 +141,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("\n── Test 5: PC1 forward (no-crash check) ──\n", .{});
     {
         // Send a binary frame to trigger forwarding + dispatch
-        const frame = try custom_codec.encode(alloc, 0x01, hw1_addr);
+        const frame = try byte_parser.encode(alloc, 0x01, hw1_addr);
         defer alloc.free(frame);
         try pc1.writeAllRaw(frame);
         // Read the response (now has trailing newline)
@@ -230,7 +230,7 @@ fn socketAddrStr(client: *TcpClient, allocator: std.mem.Allocator) ![]u8 {
 /// Sends a binary frame with the HW address as payload, then reads the response.
 fn registerPcBinary(pc: *TcpClient, hw_addr: []const u8, allocator: std.mem.Allocator, num: usize) !void {
     // Create binary frame: type=0x01, payload=HW address
-    const frame = try custom_codec.encode(allocator, 0x01, hw_addr);
+    const frame = try byte_parser.encode(allocator, 0x01, hw_addr);
     defer allocator.free(frame);
 
     try pc.writeAllRaw(frame);
