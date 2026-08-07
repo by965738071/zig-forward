@@ -265,6 +265,43 @@ test "byte_parser payload too large returns FrameTooLarge" {
     try testing.expectError(error.FrameTooLarge, parser.parse(&reader, alloc));
 }
 
+test "byte_parser large frame stays valid after consume" {
+    // 回归测试：payload 超过 FrameReader.COMPACT_THRESHOLD（4096）时，
+    // consume 若触发内存移动会破坏借用缓冲区，导致返回的 Frame.payload 悬垂。
+    const alloc = testing.allocator;
+    var parser = try createByteParser(alloc);
+    defer {
+        parser.deinit();
+        alloc.destroy(parser);
+    }
+
+    const payload1 = try alloc.alloc(u8, 5000);
+    defer alloc.free(payload1);
+    @memset(payload1, 0x41); // 'A'
+    const payload2 = try alloc.alloc(u8, 5000);
+    defer alloc.free(payload2);
+    @memset(payload2, 0x42); // 'B'
+
+    const f1 = try encode(alloc, 0x01, payload1);
+    defer alloc.free(f1);
+    const f2 = try encode(alloc, 0x02, payload2);
+    defer alloc.free(f2);
+
+    // 两帧连在一起：parse 第一帧时 consume(total_len) 会让 start>4096 触发 compact
+    var buffer = std.ArrayList(u8).empty;
+    defer buffer.deinit(alloc);
+    try buffer.appendSlice(alloc, f1);
+    try buffer.appendSlice(alloc, f2);
+
+    var reader = std.Io.Reader.fixed(buffer.items);
+    const fv1 = (try parser.parse(&reader, alloc)).?;
+    // 若 consume compact 破坏了借用缓冲区，此处 payload 内容不再是 'A' 串
+    try testing.expectEqualSlices(u8, payload1, fv1.payload);
+
+    const fv2 = (try parser.parse(&reader, alloc)).?;
+    try testing.expectEqualSlices(u8, payload2, fv2.payload);
+}
+
 test "byte_parser Frame dup" {
     const alloc = testing.allocator;
     var parser = try createByteParser(alloc);

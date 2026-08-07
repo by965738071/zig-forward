@@ -1,0 +1,354 @@
+From 463e28ee60d31e01cbcba76218de4923d2334158 Mon Sep 17 00:00:00 2001
+From: "cnb.cAf7GGfvAQA"
+ <9wxr2WEuNMziH7hj1TeKVH+cnb.cAf7GGfvAQA@noreply.cnb.cool>
+Date: Thu, 6 Aug 2026 23:23:58 +0800
+Subject: [PATCH] =?UTF-8?q?=E4=BF=AE=E5=A4=8D=E5=8D=95=E5=85=83=E6=B5=8B?=
+ =?UTF-8?q?=E8=AF=95=E6=94=B6=E9=9B=86=E4=B8=8E=E5=8D=8F=E8=AE=AE=E8=A7=A3?=
+ =?UTF-8?q?=E6=9E=90=E5=86=85=E5=AD=98=E5=AE=89=E5=85=A8=20bug?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+1. 修复 zig build test 实际运行 0 个测试的问题
+   - Zig 测试收集规则：root 模块含 pub fn main 时，通过 main 可达的
+     依赖模块测试不会被收集
+   - 新增独立测试根 src/tests.zig（无 main），相对路径引用所有带测试的
+     源码文件，zig build test 现在真正运行 29 个单元测试
+
+2. 修复 FrameReader.consume 大帧借用切片悬垂 bug
+   - consume 在 start > COMPACT_THRESHOLD 时立即 compact（移动内存），
+     破坏 ByteParser 返回的借用 Frame 切片，导致大帧 payload 乱码
+   - consume 现在只推进 start 不移动内存，压缩延迟到 readMore 进行
+   - 新增回归测试 byte_parser large frame stays valid after consume
+
+3. 修复 readUntilMagic 无限垃圾流不触发 StreamTooLong
+   - 增加 scanned 累计计数限制垃圾总量，超过 max_total 报 StreamTooLong
+   - 修正 readMore 的 max_total 检查为未读数据量
+   - 新增边界测试（恰好 max_total 不误报）
+
+4. 修复 JsonLineParser 非法 JSON 时 double-free
+   - errdefer free(raw) 后 last_line 仍指向已释放内存，下次 parse/deinit
+     二次 free
+   - errdefer 同时清空 last_line 引用
+   - 新增回归测试 json_parser invalid json then valid (no double free)
+
+5. 修复 frame_reader 测试编译错误（try 忽略 bool 返回值）
+
+6. CI: zig fmt --check 限制为 src build.zig，避免扫描 zig-pkg 依赖目录
+---
+ .github/workflows/ci.yml    |  2 +-
+ README.md                   |  1 +
+ build.zig                   | 33 +++++++++++++++++---
+ src/parser/byte_parser.zig  | 37 +++++++++++++++++++++++
+ src/parser/frame_reader.zig | 60 +++++++++++++++++++++++++------------
+ src/parser/json_parser.zig  | 19 ++++++++++++
+ src/tests.zig               | 27 +++++++++++++++++
+ 7 files changed, 155 insertions(+), 24 deletions(-)
+ create mode 100644 src/tests.zig
+
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index e9d0492..50c92eb 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -12,7 +12,7 @@ jobs:
+     steps:
+       - uses: actions/checkout@v4
+       - uses: mlugg/setup-zig@v2
+-      - run: zig fmt --check .
++      - run: zig fmt --check src build.zig
+ 
+   build:
+     runs-on: ubuntu-latest
+diff --git a/README.md b/README.md
+index 5bb93b8..ef40ed3 100644
+--- a/README.md
++++ b/README.md
+@@ -189,6 +189,7 @@ src/
+ │   ├── tcp.zig                 # AClient/CSender 接口 + TCP 实现
+ │   └── ws_client.zig           # WS 的 AClient 实现
+ ├── handlers/                   # 业务 handler（PC/HW 命令路由表）
++├── tests.zig                   # 单元测试收集根（zig build test）
+ └── test/                       # 测试与基准
+     ├── benchmark_main.zig      # 性能基准测试
+     ├── integration_test.zig    # 集成测试（单测）
+diff --git a/build.zig b/build.zig
+index e7d6456..e178acf 100644
+--- a/build.zig
++++ b/build.zig
+@@ -125,13 +125,38 @@ pub fn build(b: *std.Build) void {
+     run_cmd.step.dependOn(b.getInstallStep());
+     run_cmd.addPassthruArgs();
+ 
+-    const exe_tests = b.addTest(.{
+-        .root_module = exe.root_module,
++    // ── 单元测试（zig build test）──
++    // 测试根使用独立模块 src/tests.zig（无 main），通过相对路径 @import 引用
++    // 所有带测试的源码文件。Zig 的测试收集规则：若 root 模块声明了 `pub fn main`，
++    // 通过 main 可达的依赖模块测试不会被收集；独立测试根可确保全部测试真正运行。
++    const unit_tests = b.addTest(.{
++        .root_module = b.createModule(.{
++            .root_source_file = b.path("src/tests.zig"),
++            .target = target,
++            .optimize = optimize,
++        }),
++    });
++    const run_unit_tests = b.addRunArtifact(unit_tests);
++
++    // integration_test.zig 的单元测试依赖命名模块（app_config/pc_server/parser），
++    // 无法通过相对路径收集，单独作为测试模块注入命名依赖。
++    const integ_unit_tests = b.addTest(.{
++        .root_module = b.createModule(.{
++            .root_source_file = b.path("src/test/integration_test.zig"),
++            .target = target,
++            .optimize = optimize,
++            .imports = &.{
++                .{ .name = "app_config", .module = app_config_mod },
++                .{ .name = "pc_server", .module = pc_server_mod },
++                .{ .name = "parser", .module = parser_mod },
++            },
++        }),
+     });
+-    const run_exe_tests = b.addRunArtifact(exe_tests);
++    const run_integ_unit_tests = b.addRunArtifact(integ_unit_tests);
+ 
+     const test_step = b.step("test", "Run unit tests");
+-    test_step.dependOn(&run_exe_tests.step);
++    test_step.dependOn(&run_unit_tests.step);
++    test_step.dependOn(&run_integ_unit_tests.step);
+ 
+     // ── Integration test executable (zig build integ) ──
+     const integ_exe_mod = b.createModule(.{
+diff --git a/src/parser/byte_parser.zig b/src/parser/byte_parser.zig
+index 9c11321..9cad710 100644
+--- a/src/parser/byte_parser.zig
++++ b/src/parser/byte_parser.zig
+@@ -265,6 +265,43 @@ test "byte_parser payload too large returns FrameTooLarge" {
+     try testing.expectError(error.FrameTooLarge, parser.parse(&reader, alloc));
+ }
+ 
++test "byte_parser large frame stays valid after consume" {
++    // 回归测试：payload 超过 FrameReader.COMPACT_THRESHOLD（4096）时，
++    // consume 若触发内存移动会破坏借用缓冲区，导致返回的 Frame.payload 悬垂。
++    const alloc = testing.allocator;
++    var parser = try createByteParser(alloc);
++    defer {
++        parser.deinit();
++        alloc.destroy(parser);
++    }
++
++    const payload1 = try alloc.alloc(u8, 5000);
++    defer alloc.free(payload1);
++    @memset(payload1, 0x41); // 'A'
++    const payload2 = try alloc.alloc(u8, 5000);
++    defer alloc.free(payload2);
++    @memset(payload2, 0x42); // 'B'
++
++    const f1 = try encode(alloc, 0x01, payload1);
++    defer alloc.free(f1);
++    const f2 = try encode(alloc, 0x02, payload2);
++    defer alloc.free(f2);
++
++    // 两帧连在一起：parse 第一帧时 consume(total_len) 会让 start>4096 触发 compact
++    var buffer = std.ArrayList(u8).empty;
++    defer buffer.deinit(alloc);
++    try buffer.appendSlice(alloc, f1);
++    try buffer.appendSlice(alloc, f2);
++
++    var reader = std.Io.Reader.fixed(buffer.items);
++    const fv1 = (try parser.parse(&reader, alloc)).?;
++    // 若 consume compact 破坏了借用缓冲区，此处 payload 内容不再是 'A' 串
++    try testing.expectEqualSlices(u8, payload1, fv1.payload);
++
++    const fv2 = (try parser.parse(&reader, alloc)).?;
++    try testing.expectEqualSlices(u8, payload2, fv2.payload);
++}
++
+ test "byte_parser Frame dup" {
+     const alloc = testing.allocator;
+     var parser = try createByteParser(alloc);
+diff --git a/src/parser/frame_reader.zig b/src/parser/frame_reader.zig
+index 1e3d9fa..022cbb5 100644
+--- a/src/parser/frame_reader.zig
++++ b/src/parser/frame_reader.zig
+@@ -14,7 +14,9 @@ pub const FrameReader = struct {
+     start: usize = 0,
+ 
+     const Self = @This();
+-    /// 当 start 超过此值时压缩缓冲区（把未读数据移回开头）。
++    /// 当 start 超过此值时，下一次 readMore 会压缩缓冲区（把未读数据移回开头），
++    /// 避免缓冲区无限增长。压缩只在 readMore（下次读新数据）时进行，
++    /// 确保 consume 之后调用方持有的借用切片仍然有效。
+     const COMPACT_THRESHOLD: usize = 4096;
+ 
+     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+@@ -47,10 +49,14 @@ pub const FrameReader = struct {
+ 
+     /// 丢弃 `magic` 之前的垃圾字节，使未读数据以 `magic` 开头（若存在）。
+     /// 返回 `false` 表示 EOF（未找到 magic 且连接关闭）。
++    /// 若在找到 magic 前累计读入（含已丢弃的垃圾）超过 `max_total`，返回 `error.StreamTooLong`。
+     pub fn readUntilMagic(self: *Self, reader: *std.Io.Reader, allocator: std.mem.Allocator, magic: []const u8, max_total: usize) !bool {
++        var scanned: usize = 0; // 已扫描（含已丢弃）的字节数
+         while (true) {
+             const data = self.pendingSlice();
+             if (std.mem.indexOf(u8, data, magic)) |pos| {
++                scanned += pos;
++                if (scanned > max_total) return error.StreamTooLong;
+                 if (pos > 0) self.consume(pos);
+                 return true;
+             }
+@@ -64,8 +70,11 @@ pub const FrameReader = struct {
+                     break;
+                 }
+             }
+-            if (keep < data.len) {
+-                self.consume(data.len - keep);
++            const discard = data.len - keep;
++            if (discard > 0) {
++                scanned += discard;
++                if (scanned > max_total) return error.StreamTooLong;
++                self.consume(discard);
+             }
+ 
+             if (!try self.readMore(reader, allocator, max_total)) return false;
+@@ -102,22 +111,16 @@ pub const FrameReader = struct {
+     }
+ 
+     /// 消费（丢弃）未读数据前 `n` 字节。只前进 `start`，不移动/释放内存。
+-    /// **关键**：不调 clearRetainingCapacity/shrinkRetainingCapacity——
+-    /// ArrayList 的 shrink 会释放底层内存，DebugAllocator 随即用 0xAA poison 填充，
+-    /// 导致 parse() 返回的借用切片（指向同一块内存）读到全 0xAA。
++    /// **关键**：绝不在此处压缩/移动内存——`consume` 之后调用方仍可能持有
++    /// 借用本缓冲区的切片（例如 `ByteParser` 在 `consume(total_len)` 后返回
++    /// 指向 `peek` 结果的 `Frame`）。若在这里 `copyForwards` + shrink，
++    /// 会破坏该借用切片，导致大帧（> COMPACT_THRESHOLD）的 payload 悬垂/乱码。
++    /// 内存压缩统一延迟到 `readMore`（下一次读取新数据）时进行，
++    /// 此时调用方对上一帧借用切片的使用已结束，符合"切片在下次 readMore
++    /// 前有效"的契约。
+     pub fn consume(self: *Self, n: usize) void {
+         std.debug.assert(n <= self.pending());
+         self.start += n;
+-        // 不动 buf.items.len / capacity——保留物理内存供借用切片使用。
+-        // pending() = len - start，当 start 追上 len 时 pending()=0，逻辑上空。
+-        // 下次 readMore 开头的 compact 会把 start 归零。
+-        // start 过大时压缩，避免 buf 无限增长（此时借用切片已不再使用）。
+-        if (self.start > COMPACT_THRESHOLD and self.start < self.buf.items.len) {
+-            const remaining = self.buf.items.len - self.start;
+-            std.mem.copyForwards(u8, self.buf.items[0..remaining], self.buf.items[self.start..]);
+-            self.buf.shrinkRetainingCapacity(remaining);
+-            self.start = 0;
+-        }
+     }
+ 
+     fn readMore(self: *Self, reader: *std.Io.Reader, allocator: std.mem.Allocator, max_total: usize) !bool {
+@@ -137,7 +140,7 @@ pub const FrameReader = struct {
+         };
+         if (n == 0) return false;
+         try self.buf.appendSlice(allocator, tmp[0..n]);
+-        if (self.buf.items.len > max_total) return error.StreamTooLong;
++        if (self.buf.items.len - self.start > max_total) return error.StreamTooLong;
+         return true;
+     }
+ };
+@@ -214,7 +217,7 @@ test "frame_reader peek valid after consume (key regression test)" {
+     defer fr.deinit(alloc);
+ 
+     var reader = std.Io.Reader.fixed("AAAABBBB");
+-    try fr.ensure(&reader, alloc, 8, 1024);
++    try testing.expect(try fr.ensure(&reader, alloc, 8, 1024));
+     const first4 = fr.peek(4);
+     try testing.expectEqualStrings("AAAA", first4);
+     fr.consume(4);
+@@ -264,7 +267,26 @@ test "frame_reader readUntilMagic garbage exceeds max_total" {
+     defer fr.deinit(alloc);
+ 
+     const magic = [_]u8{ 0x55, 0xAA };
+-    var garbage: [4000]u8 = @splat(0x11);
++    // 垃圾数据超过 max_total（且不含 magic），应报 StreamTooLong
++    var garbage: [9000]u8 = @splat(0x11);
+     var reader = std.Io.Reader.fixed(&garbage);
+     try testing.expectError(error.StreamTooLong, fr.readUntilMagic(&reader, alloc, &magic, 8192));
+ }
++
++test "frame_reader readUntilMagic magic at max_total boundary" {
++    const alloc = testing.allocator;
++    var fr = FrameReader{};
++    defer fr.deinit(alloc);
++
++    const magic = [_]u8{ 0x55, 0xAA };
++    // 恰好 max_total 字节垃圾 + magic，不应误报 StreamTooLong
++    var buf = std.ArrayList(u8).empty;
++    defer buf.deinit(alloc);
++    var i: usize = 0;
++    while (i < 8192) : (i += 1) try buf.append(alloc, 0x11);
++    try buf.appendSlice(alloc, &magic);
++
++    var reader = std.Io.Reader.fixed(buf.items);
++    try testing.expect(try fr.readUntilMagic(&reader, alloc, &magic, 8192));
++    try testing.expectEqualSlices(u8, &magic, fr.peek(2));
++}
+diff --git a/src/parser/json_parser.zig b/src/parser/json_parser.zig
+index 2ed1e52..8896128 100644
+--- a/src/parser/json_parser.zig
++++ b/src/parser/json_parser.zig
+@@ -214,6 +214,25 @@ test "json_parser missing cmd" {
+     try testing.expectError(error.MissingField, parser.parse(&reader, alloc));
+ }
+ 
++test "json_parser invalid json then valid (no double free)" {
++    const alloc = testing.allocator;
++    var parser = try JsonLineParser.create(alloc);
++    defer {
++        parser.deinit();
++        alloc.destroy(parser);
++    }
++
++    // 第一次：非法 JSON → error.InvalidJson。此时 readLine 已分配 raw，
++    // 若 errdefer free(raw) 后 last_line 仍指向它，下次 parse 会 double-free。
++    var reader = std.Io.Reader.fixed("not json\n");
++    try testing.expectError(error.InvalidJson, parser.parse(&reader, alloc));
++
++    // 第二次：合法 JSON，若 last_line 悬垂则此处崩溃/报错。
++    var reader2 = std.Io.Reader.fixed("{\"cmd\":\"hi\",\"addr\":\"dev1\"}\n");
++    const fv = (try parser.parse(&reader2, alloc)).?;
++    try testing.expectEqualStrings("hi", fv.id.str);
++}
++
+ test "json_parser locateJsonValue" {
+     try testing.expectEqualStrings("hi", locateJsonValue("{\"cmd\":\"hi\"}", "cmd", "hi").?);
+     try testing.expectEqualStrings("box", locateJsonValue("{\"a\":1,\"cmd\":\"box\"}", "cmd", "box").?);
+diff --git a/src/tests.zig b/src/tests.zig
+new file mode 100644
+index 0000000..d72733a
+--- /dev/null
++++ b/src/tests.zig
+@@ -0,0 +1,27 @@
++const std = @import("std");
++
++// ── 单元测试收集根（zig build test）─────────────────────
++// 为什么需要这个文件？
++//
++// Zig 的测试收集规则：当 root 模块声明了 `pub fn main` 时，通过 main 函数
++// 可达的依赖模块中的 `test` 块**不会被收集执行**（main 被视为程序入口）。
++// 原 build.zig 使用 `exe.root_module`（即 src/main.zig，含 main）作为测试根，
++// 导致 `zig build test` 实际运行 0 个测试——所有单元测试从未被执行过。
++//
++// 本文件是一个**无 main** 的独立测试根，通过相对路径 @import 直接引用所有
++// 带测试的源码文件。测试收集器只能追踪到相对路径导入的文件中的测试块；
++// 通过命名模块字段访问（如 `_ = app_config.util`）不会触发收集。
++//
++// 注意：config/util.zig、parser/*.zig 均为纯 std 依赖，可用相对路径导入；
++// src/test/integration_test.zig 依赖命名模块（app_config/pc_server/parser），
++// 已在 build.zig 中单独作为测试模块注入命名依赖。
++comptime {
++    // src/config/util.zig
++    _ = @import("config/util.zig");
++    // src/parser/byte_parser.zig
++    _ = @import("parser/byte_parser.zig");
++    // src/parser/frame_reader.zig
++    _ = @import("parser/frame_reader.zig");
++    // src/parser/json_parser.zig
++    _ = @import("parser/json_parser.zig");
++}
+-- 
+2.39.5
+

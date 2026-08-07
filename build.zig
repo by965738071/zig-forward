@@ -125,13 +125,38 @@ pub fn build(b: *std.Build) void {
     run_cmd.step.dependOn(b.getInstallStep());
     run_cmd.addPassthruArgs();
 
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
+    // ── 单元测试（zig build test）──
+    // 测试根使用独立模块 src/tests.zig（无 main），通过相对路径 @import 引用
+    // 所有带测试的源码文件。Zig 的测试收集规则：若 root 模块声明了 `pub fn main`，
+    // 通过 main 可达的依赖模块测试不会被收集；独立测试根可确保全部测试真正运行。
+    const unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
-    const run_exe_tests = b.addRunArtifact(exe_tests);
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+
+    // integration_test.zig 的单元测试依赖命名模块（app_config/pc_server/parser），
+    // 无法通过相对路径收集，单独作为测试模块注入命名依赖。
+    const integ_unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test/integration_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "app_config", .module = app_config_mod },
+                .{ .name = "pc_server", .module = pc_server_mod },
+                .{ .name = "parser", .module = parser_mod },
+            },
+        }),
+    });
+    const run_integ_unit_tests = b.addRunArtifact(integ_unit_tests);
 
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_integ_unit_tests.step);
 
     // ── Integration test executable (zig build integ) ──
     const integ_exe_mod = b.createModule(.{

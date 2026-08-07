@@ -39,7 +39,11 @@ pub const JsonLineParser = struct {
         }
 
         const raw = try self.fr.readLine(reader, allocator, MAX_LINE_LEN) orelse return null;
-        errdefer allocator.free(raw);
+        errdefer {
+            // 解析失败时释放 raw，并清空 last_line 引用，避免下次 parse/deinit 二次 free。
+            allocator.free(raw);
+            self.last_line = &.{};
+        }
         self.last_line = raw; // 保存 owned 副本，raw 借用它的内存
 
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch return error.InvalidJson;
@@ -184,4 +188,23 @@ test "json_parser locateJsonValue" {
     try testing.expectEqualStrings("box", locateJsonValue("{\"a\":1,\"cmd\":\"box\"}", "cmd", "box").?);
     try testing.expectEqualStrings("on", locateJsonValue("{\"cmd\" : \"on\"}", "cmd", "on").?);
     try testing.expect(locateJsonValue("{\"cmd\":\"hi\"}", "cmd", "no") == null);
+}
+
+test "json_parser invalid json then valid (no double free)" {
+    const alloc = testing.allocator;
+    var parser = try JsonLineParser.create(alloc);
+    defer {
+        parser.deinit();
+        alloc.destroy(parser);
+    }
+
+    // 第一次：非法 JSON → error.InvalidJson。此时 readLine 已分配 raw，
+    // 若 errdefer free(raw) 后 last_line 仍指向它，下次 parse 会 double-free。
+    var reader = std.Io.Reader.fixed("not json\n");
+    try testing.expectError(error.InvalidJson, parser.parse(&reader, alloc));
+
+    // 第二次：合法 JSON，若 last_line 悬垂则此处崩溃/报错。
+    var reader2 = std.Io.Reader.fixed("{\"cmd\":\"hi\",\"addr\":\"dev1\"}\n");
+    const fv = (try parser.parse(&reader2, alloc)).?;
+    try testing.expectEqualStrings("hi", fv.id.str);
 }

@@ -14,7 +14,9 @@ pub const FrameReader = struct {
     start: usize = 0,
 
     const Self = @This();
-    /// 当 start 超过此值时压缩缓冲区（把未读数据移回开头）。
+    /// 当 start 超过此值时，下一次 readMore 会压缩缓冲区（把未读数据移回开头），
+    /// 避免缓冲区无限增长。压缩只在 readMore（下次读新数据）时进行，
+    /// 确保 consume 之后调用方持有的借用切片仍然有效。
     const COMPACT_THRESHOLD: usize = 4096;
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
@@ -47,10 +49,14 @@ pub const FrameReader = struct {
 
     /// 丢弃 `magic` 之前的垃圾字节，使未读数据以 `magic` 开头（若存在）。
     /// 返回 `false` 表示 EOF（未找到 magic 且连接关闭）。
+    /// 若在找到 magic 前累计读入（含已丢弃的垃圾）超过 `max_total`，返回 `error.StreamTooLong`。
     pub fn readUntilMagic(self: *Self, reader: *std.Io.Reader, allocator: std.mem.Allocator, magic: []const u8, max_total: usize) !bool {
+        var scanned: usize = 0; // 已扫描（含已丢弃）的字节数
         while (true) {
             const data = self.pendingSlice();
             if (std.mem.indexOf(u8, data, magic)) |pos| {
+                scanned += pos;
+                if (scanned > max_total) return error.StreamTooLong;
                 if (pos > 0) self.consume(pos);
                 return true;
             }
@@ -64,8 +70,11 @@ pub const FrameReader = struct {
                     break;
                 }
             }
-            if (keep < data.len) {
-                self.consume(data.len - keep);
+            const discard = data.len - keep;
+            if (discard > 0) {
+                scanned += discard;
+                if (scanned > max_total) return error.StreamTooLong;
+                self.consume(discard);
             }
 
             if (!try self.readMore(reader, allocator, max_total)) return false;
@@ -102,22 +111,16 @@ pub const FrameReader = struct {
     }
 
     /// 消费（丢弃）未读数据前 `n` 字节。只前进 `start`，不移动/释放内存。
-    /// **关键**：不调 clearRetainingCapacity/shrinkRetainingCapacity——
-    /// ArrayList 的 shrink 会释放底层内存，DebugAllocator 随即用 0xAA poison 填充，
-    /// 导致 parse() 返回的借用切片（指向同一块内存）读到全 0xAA。
+    /// **关键**：绝不在此处压缩/移动内存——`consume` 之后调用方仍可能持有
+    /// 借用本缓冲区的切片（例如 `ByteParser` 在 `consume(total_len)` 后返回
+    /// 指向 `peek` 结果的 `Frame`）。若在这里 `copyForwards` + shrink，
+    /// 会破坏该借用切片，导致大帧（> COMPACT_THRESHOLD）的 payload 悬垂/乱码。
+    /// 内存压缩统一延迟到 `readMore`（下一次读取新数据）时进行，
+    /// 此时调用方对上一帧借用切片的使用已结束，符合"切片在下次 readMore
+    /// 前有效"的契约。
     pub fn consume(self: *Self, n: usize) void {
         std.debug.assert(n <= self.pending());
         self.start += n;
-        // 不动 buf.items.len / capacity——保留物理内存供借用切片使用。
-        // pending() = len - start，当 start 追上 len 时 pending()=0，逻辑上空。
-        // 下次 readMore 开头的 compact 会把 start 归零。
-        // start 过大时压缩，避免 buf 无限增长（此时借用切片已不再使用）。
-        if (self.start > COMPACT_THRESHOLD and self.start < self.buf.items.len) {
-            const remaining = self.buf.items.len - self.start;
-            std.mem.copyForwards(u8, self.buf.items[0..remaining], self.buf.items[self.start..]);
-            self.buf.shrinkRetainingCapacity(remaining);
-            self.start = 0;
-        }
     }
 
     fn readMore(self: *Self, reader: *std.Io.Reader, allocator: std.mem.Allocator, max_total: usize) !bool {
@@ -137,7 +140,7 @@ pub const FrameReader = struct {
         };
         if (n == 0) return false;
         try self.buf.appendSlice(allocator, tmp[0..n]);
-        if (self.buf.items.len > max_total) return error.StreamTooLong;
+        if (self.buf.items.len - self.start > max_total) return error.StreamTooLong;
         return true;
     }
 };
@@ -214,7 +217,7 @@ test "frame_reader peek valid after consume (key regression test)" {
     defer fr.deinit(alloc);
 
     var reader = std.Io.Reader.fixed("AAAABBBB");
-    try fr.ensure(&reader, alloc, 8, 1024);
+    try testing.expect(try fr.ensure(&reader, alloc, 8, 1024));
     const first4 = fr.peek(4);
     try testing.expectEqualStrings("AAAA", first4);
     fr.consume(4);
@@ -264,7 +267,26 @@ test "frame_reader readUntilMagic garbage exceeds max_total" {
     defer fr.deinit(alloc);
 
     const magic = [_]u8{ 0x55, 0xAA };
-    var garbage: [4000]u8 = @splat(0x11);
+    // 垃圾数据超过 max_total（且不含 magic），应报 StreamTooLong
+    var garbage: [9000]u8 = @splat(0x11);
     var reader = std.Io.Reader.fixed(&garbage);
     try testing.expectError(error.StreamTooLong, fr.readUntilMagic(&reader, alloc, &magic, 8192));
+}
+
+test "frame_reader readUntilMagic magic at max_total boundary" {
+    const alloc = testing.allocator;
+    var fr = FrameReader{};
+    defer fr.deinit(alloc);
+
+    const magic = [_]u8{ 0x55, 0xAA };
+    // 恰好 max_total 字节垃圾 + magic，不应误报 StreamTooLong
+    var buf = std.ArrayList(u8).empty;
+    defer buf.deinit(alloc);
+    var i: usize = 0;
+    while (i < 8192) : (i += 1) try buf.append(alloc, 0x11);
+    try buf.appendSlice(alloc, &magic);
+
+    var reader = std.Io.Reader.fixed(buf.items);
+    try testing.expect(try fr.readUntilMagic(&reader, alloc, &magic, 8192));
+    try testing.expectEqualSlices(u8, &magic, fr.peek(2));
 }
